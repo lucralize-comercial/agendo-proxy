@@ -196,11 +196,24 @@ def contexto_data_atual() -> str:
             f"Lembre-se: o atendimento é de segunda a quinta das 9h às 17h e sexta das 9h às 16h30, sem fins de semana.")
 
 
-def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROMPT, tentativas: int = 3) -> str:
+USAGE_STATS = {
+    "chat":     {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+    "extracao": {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+    "outro":    {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+}
+
+
+def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROMPT, tentativas: int = 3, tipo: str = "chat") -> str:
     """Chama a API Anthropic e retorna o texto da resposta.
     Tenta novamente se vier resposta vazia (falha transitória rara da API) —
-    sem isso, uma única resposta vazia deixava o Luca em silêncio pro lead."""
-    system_completo = system + contexto_data_atual()
+    sem isso, uma única resposta vazia deixava o Luca em silêncio pro lead.
+    Usa prompt caching: o texto fixo do system fica marcado como cacheável,
+    e a data/hora atual (que muda a cada minuto) vai à parte, sem cache —
+    caso contrário o cache nunca "bateria" de uma chamada pra outra."""
+    system_blocks = [
+        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": contexto_data_atual()},
+    ]
     ultimo_erro = None
     for tentativa in range(1, tentativas + 1):
         try:
@@ -214,7 +227,7 @@ def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROM
                 json={
                     "model":      "claude-sonnet-4-5",
                     "max_tokens": max_tokens,
-                    "system":     system_completo,
+                    "system":     system_blocks,
                     "messages":   messages,
                 },
                 timeout=30,
@@ -224,6 +237,15 @@ def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROM
                       f"(tentativa {tentativa}/{tentativas})", flush=True)
             resp.raise_for_status()
             data = resp.json()
+
+            uso = data.get("usage") or {}
+            bucket = USAGE_STATS.get(tipo, USAGE_STATS["outro"])
+            bucket["chamadas"]    += 1
+            bucket["input"]       += uso.get("input_tokens", 0)
+            bucket["output"]      += uso.get("output_tokens", 0)
+            bucket["cache_read"]  += uso.get("cache_read_input_tokens", 0)
+            bucket["cache_write"] += uso.get("cache_creation_input_tokens", 0)
+
             content = data.get("content") or []
             if content and content[0].get("text"):
                 return content[0]["text"].strip()
@@ -457,6 +479,14 @@ def index():
         "history_updated_at": history_cache["updated_at"],
         "tasks_cached": len(tasks_cache["data"]), "tasks_updated_at": tasks_cache["updated_at"]
     })
+
+@app.route("/usage-stats")
+def usage_stats():
+    """Consumo de tokens acumulado desde o último boot do processo, separado
+    por tipo de chamada (chat vs extração). Reseta a cada restart do
+    container — para histórico entre restarts, ver o resumo horário no log
+    do Railway (linha [usage-hora])."""
+    return jsonify(USAGE_STATS), 200
 
 @app.route("/refresh", methods=["POST"])
 def refresh():
@@ -1267,7 +1297,8 @@ Para status use: "Em qualificação" | "Interesse confirmado" | "Aguardando e-ma
         reply = call_claude(
             [{"role": "user", "content": prompt}],
             max_tokens=600,
-            system="Você extrai dados estruturados de conversas. Retorne apenas JSON válido. Nunca invente ou deduza valores sem evidência clara e literal no texto — prefira deixar em branco."
+            system="Você extrai dados estruturados de conversas. Retorne apenas JSON válido. Nunca invente ou deduza valores sem evidência clara e literal no texto — prefira deixar em branco.",
+            tipo="extracao"
         )
         # Remove possíveis backticks
         reply = reply.replace("```json", "").replace("```", "").strip()
@@ -1399,7 +1430,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
         # Ativa "digitando..." enquanto o Claude processa
         toggle_typing(inbox_identifier, contact_identifier, conversation_id, "on")
 
-        reply = call_claude(conv["messages"], max_tokens=300, system=conv["system"])
+        reply = call_claude(conv["messages"], max_tokens=300, system=conv["system"], tipo="chat")
 
         # Desativa "digitando..."
         toggle_typing(inbox_identifier, contact_identifier, conversation_id, "off")
@@ -1443,10 +1474,16 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
         conv["contact_name_cache"] = contact_name
 
         # ── Nota interna — dados completos ou conversa encerrada ─────────────
+        # Gateado: só roda a extração enquanto o ciclo do CRM ainda não foi
+        # fechado. Antes rodava em TODA mensagem, mesmo depois de já ter
+        # tudo completo e registrado — puro desperdício de chamada à API.
         try:
-            lead_data = extract_lead_data(conv["messages"], contact_name)
-            if lead_data:
-                conv["lead_data"].update({k: v for k, v in lead_data.items() if v})
+            if conv.get("note_sent"):
+                d = conv["lead_data"]
+            else:
+                lead_data = extract_lead_data(conv["messages"], contact_name)
+                if lead_data:
+                    conv["lead_data"].update({k: v for k, v in lead_data.items() if v})
                 d = conv["lead_data"]
 
                 dados_completos = (
@@ -2468,7 +2505,29 @@ scheduler = BackgroundScheduler()
 scheduler.add_job(fetch_deals_safe, "interval", hours=1, id="fetch_recorrente")
 scheduler.add_job(fetch_tasks_job, "interval", hours=2, id="tasks_recorrente")
 scheduler.add_job(varredura_lembretes_safe, "interval", minutes=15, id="lembretes_reuniao")
+def log_resumo_usage():
+    """Imprime no log um resumo do consumo de tokens acumulado até agora
+    (desde o último boot), com custo estimado em USD. Preços de referência
+    do Claude Sonnet (input, output, cache write, cache read) — ajustar aqui
+    se a tabela de preços da Anthropic mudar."""
+    PRECO_INPUT       = 3.00  / 1_000_000
+    PRECO_OUTPUT       = 15.00 / 1_000_000
+    PRECO_CACHE_WRITE = 3.75  / 1_000_000
+    PRECO_CACHE_READ  = 0.30  / 1_000_000
+
+    total_usd = 0.0
+    for tipo, s in USAGE_STATS.items():
+        custo = (s["input"] * PRECO_INPUT + s["output"] * PRECO_OUTPUT
+                  + s["cache_write"] * PRECO_CACHE_WRITE + s["cache_read"] * PRECO_CACHE_READ)
+        total_usd += custo
+        print(f"[usage-hora] tipo={tipo} chamadas={s['chamadas']} input={s['input']} "
+              f"output={s['output']} cache_read={s['cache_read']} cache_write={s['cache_write']} "
+              f"custo_estimado=${custo:.4f}", flush=True)
+    print(f"[usage-hora] TOTAL desde o boot: ${total_usd:.4f}", flush=True)
+
+
 scheduler.add_job(mover_novos_leads_sem_conversa_safe, "interval", minutes=15, id="mover_novos_leads")
+scheduler.add_job(log_resumo_usage, "interval", hours=1, id="usage_resumo_horario")
 scheduler.add_job(verificar_followup_1h_silencio_safe, "interval", minutes=15, id="followup_1h_silencio")
 scheduler.add_job(fetch_deals_safe, "date", run_date=datetime.now() + timedelta(seconds=5), id="fetch_inicial")
 scheduler.start()
