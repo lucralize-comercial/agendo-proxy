@@ -894,6 +894,76 @@ def atualizar_pessoa_se_incompleta(person: dict, nome_lead: str, email_lead: str
         print(f"[crm] Erro ao atualizar pessoa {person.get('id')}: {e}", flush=True)
 
 
+def _reunioes_do_dia(dt_dia, owner_id):
+    """Retorna os horários (datetime, sem timezone, hora de Brasília) das
+    reuniões [Luca] já marcadas para o mesmo dia e mesmo consultor,
+    usando o cache de tasks já mantido por fetch_tasks_job (sem chamada
+    nova à API do Agendor)."""
+    resultado = []
+    for t in tasks_cache.get("data", []):
+        if t.get("type") != "reuniao":
+            continue
+        assigned = t.get("assignedUsers") or []
+        assigned_ids = {a.get("id") for a in assigned if isinstance(a, dict)}
+        if owner_id and owner_id not in assigned_ids:
+            continue
+        due = _parse_dt(t.get("dueDate"))
+        if not due:
+            continue
+        due_naive = due.replace(tzinfo=None)
+        if due_naive.date() == dt_dia.date():
+            resultado.append(due_naive)
+    return resultado
+
+
+def ajustar_horario_reuniao(dt_desejado, owner_id):
+    """Tenta evitar conflito na agenda do consultor antes de criar a
+    tarefa de reunião. Prioridades, na ordem (a de cima nunca é
+    sacrificada pela de baixo):
+      1. SEMPRE agenda — nunca deixa de marcar por falta de slot 'perfeito'.
+      2. Mantém o mesmo dia pedido pelo lead (nunca empurra pra outro dia).
+      3. Evita coincidir com o horário exato de outra reunião do mesmo
+         consultor, a não ser que não sobre nenhuma alternativa no dia.
+      4. Evita marcar com menos de 1h de antecedência (agora vs. horário).
+      5. Tenta manter 30 min de intervalo de qualquer outra reunião.
+    Retorna (dt_final, ajustado: bool). Isso é 100% interno — o lead
+    nunca sabe que isso aconteceu, e o Luca não promete nada sobre
+    agenda na conversa (regra do SYSTEM_PROMPT)."""
+    agora = datetime.utcnow() - timedelta(hours=3)
+    reunioes_dia = _reunioes_do_dia(dt_desejado, owner_id)
+
+    def respeita_intervalo(dt):
+        return all(abs((dt - r).total_seconds()) >= 30 * 60 for r in reunioes_dia)
+
+    def antecedencia_ok(dt):
+        return (dt - agora).total_seconds() >= 60 * 60
+
+    conflito_exato = any(dt_desejado == r for r in reunioes_dia)
+    if not conflito_exato and respeita_intervalo(dt_desejado) and antecedencia_ok(dt_desejado):
+        return dt_desejado, False
+
+    # Candidatos no MESMO dia, em passos de 15 min, alternando pra frente
+    # e pra trás, do mais próximo ao mais distante do horário pedido —
+    # queremos o ajuste mínimo possível.
+    candidatos = []
+    for passo in range(1, 25):  # até 6h de distância, 15 em 15 min
+        candidatos.append(dt_desejado + timedelta(minutes=15 * passo))
+        candidatos.append(dt_desejado - timedelta(minutes=15 * passo))
+
+    for cand in candidatos:
+        if cand.date() != dt_desejado.date():
+            continue
+        if not antecedencia_ok(cand):
+            continue
+        if respeita_intervalo(cand):
+            return cand, True
+
+    # Não achou slot que satisfaça tudo — prioridade é agendar, então
+    # mantém o horário original pedido pelo lead, mesmo com conflito ou
+    # antecedência curta, sem forçar nada na conversa com o lead.
+    return dt_desejado, False
+
+
 def registrar_no_crm(conv, conversation_id, contact_name):
     """Fecha o ciclo no Agendor quando a qualificação conclui:
     0. Se pessoa/negócio não existirem no CRM ainda, cria os dois primeiro
@@ -987,17 +1057,25 @@ def registrar_no_crm(conv, conversation_id, contact_name):
         if preferencia:
             owner_id = (deal.get("owner") or {}).get("id")
             dt_iso = parse_preferencia_datetime(preferencia)
+            owner_id_int = int(owner_id) if owner_id else None
             if dt_iso:
+                dt_pedido = datetime.strptime(dt_iso, "%Y-%m-%dT%H:%M")
+                dt_local, ajustado = ajustar_horario_reuniao(dt_pedido, owner_id_int)
                 texto_reuniao = ("[Luca] Reunião com especialista — pré-agendada pelo Luca via WhatsApp, "
                                  f"aguardando confirmação do consultor. Preferência do lead: {preferencia}")
-                dt_local = datetime.strptime(dt_iso, "%Y-%m-%dT%H:%M")
+                if ajustado:
+                    texto_reuniao += (f" (horário ajustado de {dt_pedido.strftime('%H:%M')} para "
+                                       f"{dt_local.strftime('%H:%M')} para evitar conflito de agenda)")
             else:
                 prox = datetime.utcnow() - timedelta(hours=3) + timedelta(days=1)
                 while prox.weekday() >= 5:
                     prox += timedelta(days=1)
-                dt_local = datetime(prox.year, prox.month, prox.day, 9, 0)
+                dt_pedido = datetime(prox.year, prox.month, prox.day, 9, 0)
+                dt_local, ajustado = ajustar_horario_reuniao(dt_pedido, owner_id_int)
                 texto_reuniao = ("[Luca] Reunião com especialista — HORÁRIO A CONFIRMAR com o lead. "
                                  f"Preferência informada: {preferencia}")
+                if ajustado:
+                    texto_reuniao += f" (horário provisório ajustado para {dt_local.strftime('%H:%M')})"
             # IMPORTANTE: a API do Agendor espera o horário LOCAL de Brasília
             # SEM indicação de timezone (nem "Z", nem offset) — ela mesma faz a
             # conversão pra UTC internamente (+3h). Mandar já convertido (com "Z"
@@ -1543,9 +1621,24 @@ def agendorchat_webhook():
         # ── Ignora se há agente humano atribuído à conversa ───────────────────
         # Exceção: o usuário do bot da automação (LUCA_BOT_ASSIGNEE) é território
         # do Luca — conversas atribuídas a ele são respondidas normalmente.
-        conversation_meta = (body.get("conversation") or {}).get("meta") or {}
-        assignee = conversation_meta.get("assignee")
+        # IMPORTANTE: não confiar no "retrato" de conversation.meta.assignee
+        # embutido no payload do webhook — ele pode estar desatualizado em
+        # relação a uma auto-atribuição muito recente (ex: consultor se
+        # atribui e responde, lead manda mensagem seguinte rápido demais, e
+        # o snapshot do webhook ainda reflete o estado de antes). Por isso,
+        # busca o assignee de verdade, na hora, via API.
         conversation_id = (body.get("conversation") or {}).get("id")  # precisa vir antes do check abaixo
+        detalhe_fresco = get_conversation_details(conversation_id) if conversation_id else {}
+        if detalhe_fresco:
+            assignee = (detalhe_fresco.get("meta") or {}).get("assignee")
+        else:
+            # Fail-safe: a chamada fresca falhou (timeout/instabilidade). Em vez
+            # de assumir "sem ninguém atribuído" (o que poderia atropelar um
+            # atendimento humano real), cai de volta no retrato embutido no
+            # próprio payload do webhook — pior que uma checagem fresca, mas
+            # nunca pior que o comportamento antigo.
+            assignee = (body.get("conversation") or {}).get("meta", {}).get("assignee")
+            print(f"[webhook] get_conversation_details falhou, usando snapshot do payload conv={conversation_id}", flush=True)
         if assignee and assignee.get("type") == "user" and not eh_assignee_bot(assignee):
             if humano_realmente_respondeu(conversation_id):
                 print(f"[webhook] IGNORADO agente humano atribuído: {assignee.get('name')}", flush=True)
