@@ -183,16 +183,26 @@ def saudacao_atual() -> str:
 
 
 def contexto_data_atual() -> str:
-    """Retorna a data/hora atual de Brasília por extenso, para o Luca não
-    errar dia da semana ao propor reuniões."""
+    """Retorna a data/hora atual de Brasília por extenso, MAIS uma tabela
+    com a data de cada dia da semana dos próximos 10 dias — pra o Luca
+    nunca precisar calcular de cabeça 'que data cai numa segunda-feira',
+    conta que o modelo erra com facilidade (bug real encontrado: lead
+    pediu 'segunda' numa sexta 07/08, Luca respondeu 11/08 — que é terça,
+    não segunda; a segunda certa era 10/08)."""
     agora = datetime.utcnow() - timedelta(hours=3)
     dias = ["segunda-feira", "terça-feira", "quarta-feira", "quinta-feira",
             "sexta-feira", "sábado", "domingo"]
     meses = ["janeiro", "fevereiro", "março", "abril", "maio", "junho",
              "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"]
+    tabela = []
+    for n in range(1, 11):
+        dia = agora + timedelta(days=n)
+        tabela.append(f"{dias[dia.weekday()]} = {dia.day:02d}/{dia.month:02d}")
     return (f"\n\nDATA E HORA ATUAIS (horário de Brasília): {dias[agora.weekday()]}, "
             f"{agora.day} de {meses[agora.month - 1]} de {agora.year}, {agora.strftime('%H:%M')}. "
-            f"Use esta informação ao falar de dias da semana, 'amanhã', prazos e horários de reunião. "
+            f"Use esta informação ao falar de dias da semana, 'amanhã', prazos e horários de reunião.\n"
+            f"PRÓXIMOS DIAS (NUNCA calcule de cabeça a data de um dia da semana — consulte aqui): "
+            f"{', '.join(tabela)}.\n"
             f"Lembre-se: o atendimento é de segunda a quinta das 9h às 17h e sexta das 9h às 16h30, sem fins de semana.")
 
 
@@ -1688,6 +1698,14 @@ def agendorchat_webhook():
         conv = conversation_histories[conv_key]
         if contact_phone:
             conv["phone"] = contact_phone
+            # Se o negócio já tinha escalado por silêncio (2°/3° Contato),
+            # o lead respondendo agora é um "retorno" — sinaliza pro time.
+            # Em thread separada, não atrasa a resposta do Luca.
+            threading.Thread(
+                target=mover_para_contato_retornado_se_aplicavel,
+                args=(contact_phone,),
+                daemon=True
+            ).start()
 
         # ── Detecta origem whatsapp_pagina na primeira mensagem ───────────────
         TEXTO_BOTAO_WHATSAPP = "Olá! Gostaria de saber mais sobre os serviços da Lucralize Tech."
@@ -2590,6 +2608,342 @@ def verificar_followup_1h_silencio_safe():
         print(f"[followup1h] Erro geral na varredura: {e}", flush=True)
 
 
+# ── Follow-up automático de silêncio (D+1 / D+3 / D+5) ───────────────────────
+# Desenho confirmado com Ronaldo em 05/08 — a régua de silêncio USA as
+# etapas que já existiam no Funil Comercial como o próprio estado, sem
+# marcador paralelo:
+#
+#   Novo Lead --(boas-vindas, já existente)--> 1º Contato (D0)  [dia da criação]
+#   1º Contato (D0)  --D+1 (1 dia corrido desde a criação)-->  nudge 1, move p/ 2° Contato
+#   2° Contato       --D+3 (3 dias corridos desde a criação)--> nudge 2, move p/ 3° Contato
+#   3° Contato       --D+5 (5 dias corridos desde a criação)--> nudge 3 (última tentativa);
+#                                              se NUNCA houve humano de
+#                                              verdade na conversa, fecha
+#                                              como PERDIDO - SEM CONTATO
+#
+#   Se o lead responder enquanto o negócio está em 2° Contato ou 3° Contato
+#   (ou seja, já tinha escalado por silêncio), move pra "Contato Retornado"
+#   — isso é feito em tempo real no webhook, não neste job.
+#
+#   O Luca NUNCA move pra "Follow-up" nem "Fechamento" — isso é decisão de
+#   quem está atendendo (evolução pós-reunião, ou fechamento direto).
+#
+# Fonte da varredura: cache["deals"] (candidatos, barato) + 1 GET fresco por
+# candidato antes de agir (confirma etapa/status atuais de verdade, evita
+# agir em cima de cache com até 1h de atraso). Nenhum estado em RAM.
+
+FUNIL_COMERCIAL_ID = 696449
+ETAPA_1_CONTATO      = 3596855  # 1º Contato (D0)
+ETAPA_2_CONTATO       = 3060060  # 2° Contato
+ETAPA_3_CONTATO       = 3060061  # 3° Contato
+ETAPA_CONTATO_RETORNADO = 2907497  # Contato Retornado
+ORDEM_ETAPAS_FUNIL_COMERCIAL = [
+    2835663,  # Novo Lead
+    3596855,  # 1º Contato (D0)
+    3060060,  # 2° Contato
+    3060061,  # 3° Contato
+    2907497,  # Contato Retornado
+    2845579,  # Reunião agendada
+    2835665,  # Follow-up
+    2835666,  # Fechamento
+]
+
+# (etapa atual, dias corridos desde a criação do negócio pra disparar, rótulo, próxima etapa ou None)
+FOLLOWUP_REGRAS = [
+    (ETAPA_1_CONTATO, 1, "D1", ETAPA_2_CONTATO),
+    (ETAPA_2_CONTATO,  3, "D3", ETAPA_3_CONTATO),
+    (ETAPA_3_CONTATO,  5, "D5", None),  # None = última tentativa, sem próxima etapa
+]
+FOLLOWUP_REGRA_POR_ETAPA = {r[0]: r for r in FOLLOWUP_REGRAS}
+REFORCO_D0_HORAS = 6  # horas após a criação pra mandar o reforço do mesmo dia, se ainda sem resposta
+
+
+def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo: bool = False) -> bool:
+    """Move o negócio pra etapa_alvo_id dentro do Funil Comercial, buscando
+    a etapa atual FRESCA antes (nunca confia em cache) — mesmo padrão já
+    usado no passo 5 de registrar_no_crm. Por padrão só avança (nunca
+    rebaixa); permitir_recuo=True é o caso de 'Contato Retornado', que
+    semanticamente é o lead voltando a se engajar, mesmo que a posição
+    dessa etapa na lista seja anterior à de 2°/3° Contato."""
+    try:
+        r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
+        deal_fresco = r_fresh.json().get("data") or {}
+    except Exception as e:
+        print(f"[funil] Erro ao buscar negócio fresco deal={deal_id}: {e}", flush=True)
+        return False
+    deal_stage = deal_fresco.get("dealStage") or {}
+    funil_atual_id = (deal_stage.get("funnel") or {}).get("id")
+    etapa_atual_id = deal_stage.get("id")
+    if funil_atual_id != FUNIL_COMERCIAL_ID:
+        print(f"[funil] Etapa não movida — negócio fora do Funil Comercial deal={deal_id}", flush=True)
+        return False
+    if etapa_atual_id not in ORDEM_ETAPAS_FUNIL_COMERCIAL:
+        print(f"[funil] Etapa atual fora da ordem mapeada (ex: já Perdido) deal={deal_id}", flush=True)
+        return False
+    idx_atual = ORDEM_ETAPAS_FUNIL_COMERCIAL.index(etapa_atual_id)
+    idx_alvo = ORDEM_ETAPAS_FUNIL_COMERCIAL.index(etapa_alvo_id)
+    if not permitir_recuo and idx_atual >= idx_alvo:
+        print(f"[funil] Etapa não movida — atual (idx={idx_atual}) já é igual/posterior ao "
+              f"alvo (idx={idx_alvo}) deal={deal_id}", flush=True)
+        return False
+    sequencia_alvo = idx_alvo + 1  # API espera a posição 1-indexed dentro do funil
+    r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/stage",
+                      headers={**HEADERS, "Content-Type": "application/json"},
+                      json={"dealStage": sequencia_alvo}, timeout=15)
+    print(f"[funil] Etapa -> {etapa_alvo_id} deal={deal_id} status={r.status_code}", flush=True)
+    return r.status_code in (200, 201)
+
+
+def mover_para_contato_retornado_se_aplicavel(phone: str):
+    """Chamado em tempo real quando o lead manda mensagem. Se o negócio já
+    tinha escalado por silêncio (está em 2° ou 3° Contato), o retorno do
+    lead move pra 'Contato Retornado' — sinaliza pro time que esse lead
+    tinha sumido e voltou. Roda em thread separada, não atrasa a resposta
+    do Luca."""
+    try:
+        _, deal = buscar_pessoa_e_negocio(phone)
+        if not deal:
+            return
+        etapa_atual_id = (deal.get("dealStage") or {}).get("id")
+        if etapa_atual_id in (ETAPA_2_CONTATO, ETAPA_3_CONTATO):
+            mover_etapa_funil_comercial(deal["id"], ETAPA_CONTATO_RETORNADO, permitir_recuo=True)
+    except Exception as e:
+        print(f"[contato_retornado] Erro phone={phone}: {e}", flush=True)
+
+
+def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
+    """True se, em QUALQUER ponto da conversa (não só depois da última
+    mensagem do lead — diferente de humano_realmente_respondeu), existe uma
+    mensagem de saída escrita por um humano de verdade (sender.type ==
+    'user'), não pelo Bot/automação. Decide se um lead silencioso no D+5 é
+    elegível a fechar como PERDIDO - SEM CONTATO: só é, se ninguém jamais
+    interveio de verdade nessa conversa."""
+    try:
+        msgs = mensagens_da_conversa(conversation_id)
+        for m in msgs:
+            if m.get("message_type") == 1 and not m.get("private"):
+                sender = m.get("sender") or {}
+                if sender.get("type") == "user":
+                    return True
+        return False
+    except Exception as e:
+        print(f"[followup_dias] Erro ao checar intervenção humana conv={conversation_id}: {e}", flush=True)
+        return True  # fail-safe: em erro, assume que já teve humano — nunca marca perdido por engano
+
+
+def marcar_perdido_sem_contato(deal_id: int) -> bool:
+    """Move o negócio para o status/motivo 'PERDIDO - SEM CONTATO'.
+
+    ⚠️ NÃO ATIVAR EM PRODUÇÃO sem confirmar antes com o suporte do Agendor
+    (ou testando num negócio de mentira) o endpoint e o payload exatos —
+    mesmo cuidado que já foi necessário com due_date, dealStage e
+    assigned_users, que tinham nomes/formatos diferentes do documentado.
+    O que está abaixo é a melhor hipótese com base no padrão da API v3
+    (endpoint /deals/{id}/status, dealStatus 3 = perdido, já confirmado em
+    uso em outras partes do código), mas o campo do MOTIVO de perda
+    ("lostReason") não foi testado — motivos de perda costumam ter uma
+    lista fixa de IDs cadastrados na conta, pode não ser texto livre."""
+    if not deal_id:
+        return False
+    try:
+        payload = {
+            "dealStatus": 3,  # 3 = perdido — já confirmado em uso no dashboard
+            "lostReason": "PERDIDO - SEM CONTATO",  # NOME/CAMPO NÃO CONFIRMADO — testar antes de confiar
+        }
+        r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/status",
+                          headers={**HEADERS, "Content-Type": "application/json"},
+                          json=payload, timeout=15)
+        print(f"[followup_dias] Marcado PERDIDO - SEM CONTATO deal={deal_id} "
+              f"status={r.status_code} resp={r.text[:200]}", flush=True)
+        return r.status_code in (200, 201)
+    except Exception as e:
+        print(f"[followup_dias] Erro ao marcar perdido deal={deal_id}: {e}", flush=True)
+        return False
+
+
+def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
+    """Envia o nudge de silêncio (D1/D3/D5). Por definição a janela de 24h
+    do WhatsApp certamente está fechada (o lead está silencioso há 1+ dia),
+    então isso SEMPRE usa template aprovado da Meta, nunca mensagem livre.
+
+    ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5) ainda NÃO existem —
+    precisam ser criados e aprovados no Meta Business Suite antes de
+    ativar FOLLOWUP_ATIVOS, igual já foi feito pros templates de lembrete
+    de reunião. Os nomes aqui são só sugestão."""
+    nome_template = {"D1": "followup_silencio_d1",
+                      "D3": "followup_silencio_d3",
+                      "D5": "followup_silencio_d5"}[tag]
+    tpl = template_por_nome(nome_template)
+    if not tpl:
+        send_private_note(conversation_id, (
+            f"🔁 Follow-up {tag} NÃO enviado — template '{nome_template}' não encontrado/aprovado "
+            f"no Meta Business Suite."))
+        print(f"[followup_dias] {tag} SEM TEMPLATE conv={conversation_id}", flush=True)
+        return False
+
+    preview = {
+        "D1": "Passando pra saber se ainda faz sentido a gente conversar.",
+        "D3": "Ainda por aqui, se quiser retomar é só me chamar.",
+        "D5": "Última tentativa de contato antes de encerrar por aqui.",
+    }[tag]
+    enviar_template_conversa(conversation_id, tpl, {"1": nome or "tudo bem"}, preview)
+    send_private_note(conversation_id, f"🔁 Follow-up {tag} enviado ao lead via template.")
+    espelho_crm(deal_id, f"🤖 Follow-up automático ({tag}) enviado ao lead — silêncio de {tag[1:]} dia(s).")
+    print(f"[followup_dias] ✅ {tag} enviado conv={conversation_id} deal={deal_id}", flush=True)
+    return True
+
+
+def verificar_followup_dias_silencio():
+    if not _flag("FOLLOWUP_ATIVOS", "false"):
+        print("[followup_dias] varredura pulada — FOLLOWUP_ATIVOS desligado", flush=True)
+        return
+    agora_brt = datetime.utcnow() - timedelta(hours=3)
+    if not (8 <= agora_brt.hour < 20):
+        print(f"[followup_dias] pulado — fora do horário de envio ({agora_brt.strftime('%H:%M')} BRT)", flush=True)
+        return
+
+    deals = cache.get("deals") or []
+    candidatos = [
+        d for d in deals
+        if ((d.get("dealStage") or {}).get("funnel") or {}).get("id") == FUNIL_COMERCIAL_ID
+        and (d.get("dealStage") or {}).get("id") in FOLLOWUP_REGRA_POR_ETAPA
+        and (d.get("dealStatus") or {}).get("id") == 1  # só negócios ainda em andamento
+    ]
+
+    enviados = 0
+    for d in candidatos:
+        deal_id = d.get("id")
+        try:
+            # Etapa fresca, não a do cache (pode ter até 1h de atraso) —
+            # evita agir duas vezes em cima de uma etapa que já mudou.
+            r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
+            deal_fresco = r_fresh.json().get("data") or {}
+        except Exception as e:
+            print(f"[followup_dias] Erro ao buscar negócio fresco deal={deal_id}: {e}", flush=True)
+            continue
+
+        etapa_atual_id = (deal_fresco.get("dealStage") or {}).get("id")
+        regra = FOLLOWUP_REGRA_POR_ETAPA.get(etapa_atual_id)
+        if not regra or (deal_fresco.get("dealStatus") or {}).get("id") != 1:
+            continue  # já saiu dessa etapa, ou não está mais em andamento
+
+        # ── Reforço do mesmo dia (D0), antes do primeiro marco D+1 ──────────
+        # Ainda dentro do dia da criação, sem stage-move (fica em 1º Contato
+        # mesmo). Usa marcador em nota privada (não dá pra usar a etapa como
+        # estado aqui, já que tanto o reforço quanto o D+1 partem da mesma
+        # etapa). Mensagem livre (não precisa de template Meta): como é no
+        # mesmo dia, a janela de 24h do WhatsApp ainda deve estar aberta.
+        if etapa_atual_id == ETAPA_1_CONTATO:
+            start_time_raw = deal_fresco.get("startTime")
+            criado_ts = None
+            if start_time_raw:
+                try:
+                    criado_ts = datetime.strptime(start_time_raw[:19], "%Y-%m-%dT%H:%M:%S")
+                except Exception:
+                    criado_ts = None
+            if criado_ts:
+                horas_desde_criacao = (datetime.utcnow() - criado_ts).total_seconds() / 3600
+                ainda_no_mesmo_dia = (datetime.utcnow() - timedelta(hours=3)).date() == \
+                                     (criado_ts - timedelta(hours=3)).date()
+                if ainda_no_mesmo_dia:
+                    # Ainda no dia da criação — só o reforço pode se aplicar
+                    # aqui, o D+1 nunca dispara no mesmo dia. Sempre "continue"
+                    # ao final deste bloco (nada mais a fazer nesta passada).
+                    if horas_desde_criacao >= REFORCO_D0_HORAS:
+                        person_r = deal_fresco.get("person") or {}
+                        person_id_r = person_r.get("id")
+                        if person_id_r:
+                            try:
+                                phone_r = telefone_da_pessoa(person_id_r)
+                                conv_r = conversa_do_telefone(phone_r) if phone_r else None
+                                if conv_r and conv_r.get("status") == "open":
+                                    conv_id_r = conv_r.get("id")
+                                    msgs_r = mensagens_da_conversa(conv_id_r)
+                                    if not marcador_existe(msgs_r, "[followup:reforco_d0]") \
+                                       and conversa_parece_estagnada(conv_id_r):
+                                        nome_r = (person_r.get("name") or "").strip().split(" ")[0] \
+                                                 if person_r.get("name") else ""
+                                        texto = (f"Oi{', ' + nome_r if nome_r else ''}! Passando pra saber se "
+                                                 f"ficou alguma dúvida ou se posso te ajudar com mais alguma coisa "
+                                                 f"por aqui. 😊")
+                                        send_agendorchat_message(conv_id_r, texto)
+                                        send_private_note(conv_id_r, "🔁 Reforço do mesmo dia (D0) enviado ao "
+                                                                       "lead. [followup:reforco_d0]")
+                                        print(f"[followup_dias] ✅ reforço D0 enviado deal={deal_id}", flush=True)
+                            except Exception as e:
+                                print(f"[followup_dias] Erro no reforço D0 deal={deal_id}: {e}", flush=True)
+                    continue
+                # Se não é mais o mesmo dia (ainda_no_mesmo_dia == False), cai
+                # pro fluxo normal abaixo, que vai avaliar o marco D+1.
+
+        _, dias_limite, tag, proxima_etapa = regra
+
+        # Relógio contado a partir da CRIAÇÃO do negócio (startTime), não do
+        # silêncio do lead — confirmado com Ronaldo em 05/08. Ex.: criado
+        # segunda 03/08 -> D+1 dispara terça 04/08, D+3 dispara quinta 06/08
+        # (dias corridos simples a partir da criação).
+        start_time = deal_fresco.get("startTime")
+        if not start_time:
+            continue
+        try:
+            criado_em = datetime.strptime(start_time[:10], "%Y-%m-%d")
+        except Exception:
+            continue
+        dias_desde_criacao = (datetime.utcnow() - criado_em).days
+        if dias_desde_criacao < dias_limite:
+            continue
+
+        person = deal_fresco.get("person") or {}
+        person_id = person.get("id")
+        nome = (person.get("name") or "").strip().split(" ")[0] if person.get("name") else ""
+        if not person_id:
+            continue
+        try:
+            phone = telefone_da_pessoa(person_id)
+            if not phone:
+                continue
+            conv = conversa_do_telefone(phone)
+            if not conv or conv.get("status") != "open":
+                continue
+            conversation_id = conv.get("id")
+
+            if not conversa_parece_estagnada(conversation_id):
+                print(f"[followup_dias] Pulado — conversa parece concluída naturalmente "
+                      f"conv={conversation_id}", flush=True)
+                continue
+
+            enviado = enviar_followup_dia(conversation_id, deal_id, phone, tag, nome)
+            if not enviado:
+                continue
+            enviados += 1
+
+            if proxima_etapa:
+                mover_etapa_funil_comercial(deal_id, proxima_etapa)
+            else:
+                # D+5 na 3° Contato — última tentativa esgotada
+                if not humano_ja_atendeu_alguma_vez(conversation_id):
+                    if marcar_perdido_sem_contato(deal_id):
+                        send_private_note(conversation_id,
+                            "🔁 Follow-up D5 esgotado, sem intervenção humana em nenhum momento "
+                            "— negócio marcado PERDIDO - SEM CONTATO.")
+                else:
+                    print(f"[followup_dias] D5 enviado mas humano já interveio em algum "
+                          f"momento — não marca perdido, deal={deal_id}", flush=True)
+
+        except Exception as e:
+            print(f"[followup_dias] Erro deal={deal_id}: {e}", flush=True)
+
+    print(f"[followup_dias] varredura concluída: {len(candidatos)} candidatos, "
+          f"{enviados} follow-ups enviados", flush=True)
+
+
+def verificar_followup_dias_silencio_safe():
+    try:
+        verificar_followup_dias_silencio()
+    except Exception as e:
+        print(f"[followup_dias] Erro geral na varredura: {e}", flush=True)
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # SCHEDULER + MAIN
 # ═════════════════════════════════════════════════════════════════════════════
@@ -2622,6 +2976,7 @@ def log_resumo_usage():
 scheduler.add_job(mover_novos_leads_sem_conversa_safe, "interval", minutes=15, id="mover_novos_leads")
 scheduler.add_job(log_resumo_usage, "interval", hours=1, id="usage_resumo_horario")
 scheduler.add_job(verificar_followup_1h_silencio_safe, "interval", minutes=15, id="followup_1h_silencio")
+scheduler.add_job(verificar_followup_dias_silencio_safe, "interval", hours=3, id="followup_dias_silencio")
 scheduler.add_job(fetch_deals_safe, "date", run_date=datetime.now() + timedelta(seconds=5), id="fetch_inicial")
 scheduler.start()
 
