@@ -2252,7 +2252,14 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
         for m in apos:
             if m.get("message_type") == 1:
                 sender = m.get("sender") or {}
-                if sender.get("type") == "user":
+                # CRÍTICO: send_agendorchat_message manda as respostas do
+                # próprio Luca com o token do bot, e a plataforma registra
+                # isso como sender.type == "user" — IGUAL a um humano de
+                # verdade. Sem excluir o bot aqui, o Luca podia encontrar a
+                # PRÓPRIA resposta anterior e concluir que um humano já
+                # respondeu, calando-se para sempre (bug real: caso Pietro/
+                # Luiz Santos, 07/08).
+                if sender.get("type") == "user" and not eh_assignee_bot(sender):
                     return True
         return False
     except Exception as e:
@@ -2758,15 +2765,17 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     """True se, em QUALQUER ponto da conversa (não só depois da última
     mensagem do lead — diferente de humano_realmente_respondeu), existe uma
     mensagem de saída escrita por um humano de verdade (sender.type ==
-    'user'), não pelo Bot/automação. Decide se um lead silencioso no D+5 é
-    elegível a fechar como PERDIDO - SEM CONTATO: só é, se ninguém jamais
-    interveio de verdade nessa conversa."""
+    'user' E não é o próprio Luca — ver nota em humano_realmente_respondeu
+    sobre send_agendorchat_message também usar sender.type=='user'), não
+    pelo Bot/automação. Decide se um lead silencioso no D+5 é elegível a
+    fechar como PERDIDO - SEM CONTATO: só é, se ninguém jamais interveio
+    de verdade nessa conversa."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         for m in msgs:
             if m.get("message_type") == 1 and not m.get("private"):
                 sender = m.get("sender") or {}
-                if sender.get("type") == "user":
+                if sender.get("type") == "user" and not eh_assignee_bot(sender):
                     return True
         return False
     except Exception as e:
