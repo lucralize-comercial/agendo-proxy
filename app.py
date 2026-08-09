@@ -732,6 +732,42 @@ def toggle_typing(inbox_identifier: str, contact_identifier: str, conversation_i
 
 FUNIL_COMERCIAL_ID = 696449
 
+def status_reuniao_real(phone: str) -> str:
+    """Checa o estado REAL (via CRM, não via histórico de mensagens) de
+    uma eventual reunião pro negócio desse telefone. Barato: usa o
+    tasks_cache já em memória (atualizado de hora em hora) pra achar a
+    tarefa, só 1 chamada nova à API (buscar_pessoa_e_negocio) pra achar o
+    negócio — nenhuma chamada ao Claude. Retorna uma frase curta pra
+    injetar no contexto, ou "" se não achar nada (fail-open, não bloqueia
+    a conversa)."""
+    try:
+        _, deal = buscar_pessoa_e_negocio(phone)
+        if not deal:
+            return ""
+        deal_id = deal.get("id")
+        tasks_do_deal = [
+            t for t in (tasks_cache.get("data") or [])
+            if (t.get("deal") or {}).get("id") == deal_id and t.get("type") == "Reunião"
+        ]
+        if not tasks_do_deal:
+            return "Não há nenhuma reunião registrada no CRM pra este lead atualmente."
+        # A mais recente primeiro
+        tasks_do_deal.sort(key=lambda t: t.get("dueDate") or "", reverse=True)
+        t = tasks_do_deal[0]
+        due = _parse_dt(t.get("dueDate"))
+        due_fmt = due.strftime("%d/%m às %H:%M") if due else "data indefinida"
+        if t.get("finishedAt"):
+            return (f"A última reunião registrada no CRM pra este lead (era pra {due_fmt}) "
+                     f"JÁ FOI CONCLUÍDA/MARCADA COMO FINALIZADA. Se o histórico da conversa mencionar "
+                     f"essa reunião como algo futuro, ISSO ESTÁ DESATUALIZADO — não trate como "
+                     f"compromisso pendente.")
+        return (f"Segundo o CRM (fonte confiável, mais atual que o histórico da conversa), "
+                f"há uma reunião ainda ABERTA/pendente agendada pra {due_fmt}.")
+    except Exception as e:
+        print(f"[status_reuniao] Erro phone={phone}: {e}", flush=True)
+        return ""
+
+
 def buscar_pessoa_e_negocio(phone):
     """Localiza a pessoa pelo telefone e o negócio mais recente dela DENTRO
     DO FUNIL COMERCIAL (ignora negócios de outros funis, ex: Reativação,
@@ -1733,6 +1769,13 @@ def agendorchat_webhook():
             extra += (" Esta conversa foi reaberta após um atendimento anterior "
                       "ter sido encerrado — cumprimente o lead calorosamente, "
                       "como quem dá boas-vindas de volta, antes de seguir normalmente.")
+            # Checa o estado REAL da reunião no CRM (não confia só no que está
+            # escrito no histórico de mensagens, que pode estar desatualizado
+            # se muito tempo passou). Barato: sem chamada ao Claude.
+            if contact_phone:
+                status_real = status_reuniao_real(contact_phone)
+                if status_real:
+                    extra += f"\n\nSTATUS REAL DA REUNIÃO (verificado agora no CRM): {status_real}"
             # Preserva o que já sabíamos sobre o lead (segmento, necessidade,
             # e-mail etc.) em vez de apagar tudo — evita reperguntar o básico
             # pra quem já respondeu antes, dentro da mesma sessão do processo.
