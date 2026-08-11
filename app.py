@@ -290,6 +290,131 @@ AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "PBL8Q~pfG-XmBkvvmv5
 AZURE_TENANT_ID     = os.environ.get("AZURE_TENANT_ID",     "5173aa83-66e1-49f3-9128-f2251b43294d")
 CALENDAR_USER       = os.environ.get("CALENDAR_USER",       "ronaldojunior@lucralize.com.br")
 
+# Organizador e convidados fixos da reunião com o especialista — confirmado
+# com Ronaldo em 11/08: o Everton normalmente conduz, Ronaldo e Luiz ficam
+# em cópia pra acompanhar. Substituição de organizador em caso de
+# indisponibilidade continua manual (não previsível no momento do agendamento).
+TEAMS_ORGANIZADOR = os.environ.get("TEAMS_ORGANIZADOR", "evertonsilva@lucralize.com.br")
+TEAMS_COPIA = [
+    e.strip() for e in os.environ.get(
+        "TEAMS_COPIA", "ronaldojunior@lucralize.com.br,luizsantos@lucralize.com.br"
+    ).split(",") if e.strip()
+]
+
+_azure_token_cache = {"token": None, "expira_em": 0}
+
+
+def obter_token_azure() -> str:
+    """Token de acesso app-only (client credentials) pra Microsoft Graph.
+    Cacheado até ~5 min antes de expirar (tokens da Graph duram ~1h)."""
+    if _azure_token_cache["token"] and time.time() < _azure_token_cache["expira_em"] - 300:
+        return _azure_token_cache["token"]
+    url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+    payload = {
+        "client_id": AZURE_CLIENT_ID,
+        "client_secret": AZURE_CLIENT_SECRET,
+        "scope": "https://graph.microsoft.com/.default",
+        "grant_type": "client_credentials",
+    }
+    r = requests.post(url, data=payload, timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    _azure_token_cache["token"] = data["access_token"]
+    _azure_token_cache["expira_em"] = time.time() + int(data.get("expires_in", 3600))
+    return _azure_token_cache["token"]
+
+
+def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
+                          linha_negocio: str = "contabilidade", duracao_min: int = 20) -> dict:
+    """Cria a reunião de verdade no Teams via Microsoft Graph, com:
+      - Organizador: TEAMS_ORGANIZADOR (Everton, por padrão)
+      - Convidados em cópia: TEAMS_COPIA (Ronaldo + Luiz, por padrão)
+      - Convidado externo: o lead (obrigatório, recebe o convite por e-mail)
+    start_iso: horário de Brasília, formato "2026-08-12T14:00:00" (sem timezone).
+    linha_negocio: "tech" ou "contabilidade", decide o título da reunião
+    ("Videochamada Lucralize Tech - Nome Sobrenome" ou "... Contabilidade -
+    Nome Sobrenome"; se o lead_name não tiver sobrenome, fica só o nome).
+
+    ⚠️ GRAVAÇÃO E TRANSCRIÇÃO AUTOMÁTICAS: incluí uma tentativa best-effort
+    de configurar isso via PATCH no recurso onlineMeeting. Uma print real
+    da tela "Opções de Reunião" do Teams (11/08) confirma que essa
+    configuração existe e combina duas coisas numa escolha só: "Gravar e
+    transcrever" / "Somente transcrição" / "Desativado". Isso sugere DOIS
+    campos separados na API (um pra gravação, outro pra transcrição), não
+    um só. Uso "recordAutomatically" (razoavelmente confirmado pela
+    documentação da Graph) e uma segunda tentativa com um nome de campo de
+    transcrição que NÃO está confirmado. É a melhor hipótese, não uma
+    certeza. Se qualquer uma falhar, a reunião é criada normalmente mesmo
+    assim (a falha não derruba o agendamento). Testar com uma reunião de
+    mentira antes de confiar 100% nisso, mesmo cuidado que já foi
+    necessário com as APIs do Agendor.
+    """
+    token = obter_token_azure()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    attendees = [{"emailAddress": {"address": lead_email, "name": lead_name},
+                  "type": "required"}]
+    for email_copia in TEAMS_COPIA:
+        attendees.append({"emailAddress": {"address": email_copia}, "type": "optional"})
+
+    inicio = datetime.strptime(start_iso[:19], "%Y-%m-%dT%H:%M:%S")
+    fim = inicio + timedelta(minutes=duracao_min)
+
+    nome_linha = "Lucralize Tech" if linha_negocio == "tech" else "Lucralize Contabilidade"
+    subject = f"Videochamada {nome_linha} - {(lead_name or '').strip()}"
+
+    payload = {
+        "subject": subject,
+        "start": {"dateTime": inicio.strftime("%Y-%m-%dT%H:%M:%S"), "timeZone": "America/Sao_Paulo"},
+        "end":   {"dateTime": fim.strftime("%Y-%m-%dT%H:%M:%S"),    "timeZone": "America/Sao_Paulo"},
+        "attendees": attendees,
+        "isOnlineMeeting": True,
+        "onlineMeetingProvider": "teamsForBusiness",
+    }
+    url = f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/events"
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    r.raise_for_status()
+    evento = r.json()
+    join_url = (evento.get("onlineMeeting") or {}).get("joinUrl", "")
+
+    # Tentativa best-effort de ligar a gravação automática, não bloqueia o
+    # agendamento se falhar (ver aviso na docstring acima). O ID do evento de
+    # calendário NÃO é o ID do recurso onlineMeeting; é preciso buscar o
+    # onlineMeeting de verdade filtrando pelo joinWebUrl antes de dar PATCH.
+    try:
+        if join_url:
+            import urllib.parse
+            filtro = urllib.parse.quote(f"JoinWebUrl eq '{join_url}'")
+            busca = requests.get(
+                f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings?$filter={filtro}",
+                headers=headers, timeout=15
+            )
+            busca.raise_for_status()
+            resultados = busca.json().get("value") or []
+            if resultados:
+                meeting_id = resultados[0].get("id")
+                requests.patch(
+                    f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings/{meeting_id}",
+                    headers=headers,
+                    # "recordAutomatically" tem razoável confirmação na doc da
+                    # Graph. "transcribeAutomatically" é palpite, baseado na
+                    # tela de "Opções de Reunião" mostrar os dois juntos.
+                    # NÃO confirmado, testar antes de confiar.
+                    json={"recordAutomatically": True, "transcribeAutomatically": True},
+                    timeout=15
+                )
+    except Exception as e:
+        print(f"[teams] Gravação/transcrição automática não confirmada (não bloqueia o agendamento): {e}", flush=True)
+
+    return {
+        "join_url": join_url,
+        "event_id": evento.get("id"),
+        "organizador": TEAMS_ORGANIZADOR,
+        "copia": TEAMS_COPIA,
+        "lead_email": lead_email,
+        "start": start_iso,
+    }
+
 
 cache = {"deals": [], "total": 0, "updated_at": None}
 history_cache = {"data": [], "updated_at": None, "total_processed": 0, "total_target": 0}
@@ -2055,15 +2180,16 @@ def agendar():
         return resp, 200
 
     try:
-        body       = request.get_json(force=True) or {}
-        lead_name  = body.get("lead_name", "Lead")
-        lead_email = body.get("lead_email", "")
-        start      = body.get("start", "")
+        body          = request.get_json(force=True) or {}
+        lead_name     = body.get("lead_name", "Lead")
+        lead_email    = body.get("lead_email", "")
+        start         = body.get("start", "")
+        linha_negocio = body.get("linha_negocio", "contabilidade")
 
         if not lead_email or not start:
             return jsonify({"error": "lead_email e start são obrigatórios"}), 400
 
-        result = create_teams_meeting(lead_name, lead_email, start)
+        result = create_teams_meeting(lead_name, lead_email, start, linha_negocio)
         return jsonify(result), 200
 
     except requests.HTTPError as e:
