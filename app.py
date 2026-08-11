@@ -361,19 +361,24 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
     ("Videochamada Lucralize Tech - Nome Sobrenome" ou "... Contabilidade -
     Nome Sobrenome"; se o lead_name não tiver sobrenome, fica só o nome).
 
-    ⚠️ GRAVAÇÃO E TRANSCRIÇÃO AUTOMÁTICAS: incluí uma tentativa best-effort
-    de configurar isso via PATCH no recurso onlineMeeting. Uma print real
-    da tela "Opções de Reunião" do Teams (11/08) confirma que essa
-    configuração existe e combina duas coisas numa escolha só: "Gravar e
-    transcrever" / "Somente transcrição" / "Desativado". Isso sugere DOIS
-    campos separados na API (um pra gravação, outro pra transcrição), não
-    um só. Uso "recordAutomatically" (razoavelmente confirmado pela
-    documentação da Graph) e uma segunda tentativa com um nome de campo de
-    transcrição que NÃO está confirmado. É a melhor hipótese, não uma
-    certeza. Se qualquer uma falhar, a reunião é criada normalmente mesmo
-    assim (a falha não derruba o agendamento). Testar com uma reunião de
-    mentira antes de confiar 100% nisso, mesmo cuidado que já foi
-    necessário com as APIs do Agendor.
+    ⚠️ GRAVAÇÃO AUTOMÁTICA: segunda opinião (ChatGPT, 11/08, cruzando com a
+    documentação da Graph) confirmou e corrigiu o diagnóstico:
+      - "transcribeAutomatically" NÃO existe no modelo v1.0 — removido.
+        O campo real é "allowTranscription", mas esse é IMUTÁVEL depois que
+        a reunião é criada (só dá pra definir na criação via /onlineMeetings,
+        que por sua vez não gera convite de calendário nativo). Ou seja,
+        transcrição automática via PATCH simplesmente não é possível nesse
+        desenho — só "recordAutomatically" é.
+      - Falta um pré-requisito que ainda não tínhamos identificado: além da
+        permissão de app (OnlineMeetings.ReadWrite.All), a Microsoft exige
+        uma "Application Access Policy" concedendo ao app acesso às
+        reuniões de um usuário específico (Everton) — isso é configurado
+        via PowerShell (Teams/Skype for Business Online), não pelo Azure
+        Portal, e provavelmente explica os 403 mesmo com a permissão certa.
+      - Object ID (não e-mail/UPN) é mesmo o formato certo pra essa chamada,
+        confirmado.
+    Transcrição automática ficou fora do escopo desta função — depende da
+    política de conta no Teams Admin Center (pedido já feito ao TI).
     """
     token = obter_token_azure()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -431,15 +436,16 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
                 patch_resp = requests.patch(
                     f"https://graph.microsoft.com/v1.0/users/{object_id}/onlineMeetings/{meeting_id}",
                     headers=headers,
-                    # "recordAutomatically" tem razoável confirmação na doc da
-                    # Graph. "transcribeAutomatically" é palpite, baseado na
-                    # tela de "Opções de Reunião" mostrar os dois juntos.
-                    # NÃO confirmado, testar antes de confiar.
-                    json={"recordAutomatically": True, "transcribeAutomatically": True},
+                    # "recordAutomatically" é a propriedade confirmada e
+                    # atualizável via PATCH no modelo v1.0 (confirmado com
+                    # segunda opinião em 11/08). "transcribeAutomatically"
+                    # não existe; "allowTranscription" existe mas é imutável
+                    # após a criação, por isso não é tentado aqui.
+                    json={"recordAutomatically": True},
                     timeout=15
                 )
                 patch_resp.raise_for_status()
-                print(f"[teams] ✅ Gravação/transcrição automática configurada com sucesso, "
+                print(f"[teams] ✅ Gravação automática configurada com sucesso, "
                       f"meeting_id={meeting_id}", flush=True)
             else:
                 print(f"[teams] Busca do onlineMeeting não retornou nenhum resultado "
