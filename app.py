@@ -387,8 +387,12 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
     # onlineMeeting de verdade filtrando pelo joinWebUrl antes de dar PATCH.
     try:
         if join_url:
-            import urllib.parse
-            filtro = urllib.parse.quote(f"joinWebUrl eq '{join_url}'")
+            # O join_url já vem com trechos percent-encoded de propósito (faz
+            # parte do formato válido do link do Teams, ex: %3a, %40) — NÃO
+            # pode ser codificado de novo, ou vira %253a/%2540 e quebra o
+            # filtro (foi exatamente esse o bug do 400 nas duas tentativas
+            # anteriores). Só o espaço do "eq" precisa de escape aqui.
+            filtro = f"JoinWebUrl eq '{join_url}'".replace(" ", "%20")
             busca = requests.get(
                 f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings?$filter={filtro}",
                 headers=headers, timeout=15
