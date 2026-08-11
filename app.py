@@ -3,6 +3,7 @@ from flask_cors import CORS
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime, timedelta, timezone
 import requests
+import re
 import os
 import time
 import threading
@@ -97,10 +98,10 @@ Horários válidos: seg a qui 09h-17h, sex 09h-16h30. Sem fins de semana.
 HORÁRIO DE ALMOÇO (12h-13h): evite agendar nesse intervalo. Ao sugerir horários, NUNCA ofereça espontaneamente opções entre 12h e 13h, sugira manhã (antes das 12h) ou tarde (a partir das 13h). Se o lead disser que só consegue no almoço, primeiro tente alternativas: "E bem cedinho, tipo 9h? Ou no fim da tarde?". Somente se o lead realmente não tiver NENHUMA outra possibilidade, aceite anotar a preferência no almoço com a ressalva: "Esse horário depende de confirmação do especialista, tá? Ele te retorna confirmando ou sugerindo o mais próximo possível."
 NUNCA sugira sábado ou domingo. Se o lead sugerir fim de semana, oriente: "Nosso atendimento é de segunda a sexta. Qual dia funciona melhor?"
 Se o lead pedir hoje e estiver dentro do horário, aceite. Se for fora do horário ou fim de semana, sugira o próximo dia útil. Nunca diga "amanhã" se amanhã for sábado ou domingo.
-NUNCA prometa verificar agenda, que o consultor liga agora ou que vai encaixar o lead. Apenas anote a preferência.
+NUNCA prometa verificar agenda, que o consultor liga agora ou que vai encaixar o lead. Apenas anote a preferência. EXCEÇÃO: se o system trouxer uma nota de "checagem real de agenda" indicando que o horário pedido está ocupado e sugerindo alternativas, use essas alternativas naturalmente na resposta, sem dizer a frase "verifiquei a agenda" ou algo parecido, como se já soubesse esses horários de cor.
 
 11. ENCERRAMENTO: "Perfeito! Anotei sua preferência para [dia] às [horário]. Nosso consultor confirma o agendamento pelo WhatsApp em breve. Qualquer dúvida, estou por aqui!"
-NUNCA diga que vai verificar a agenda ou que o consultor liga agora. Apenas confirme que anotou.
+NUNCA diga que vai verificar a agenda ou que o consultor liga agora. Apenas confirme que anotou (ou confirme a alternativa combinada, se for o caso da exceção acima).
 
 RESISTÊNCIAS COMUNS:
 As respostas abaixo mostram a INTENÇÃO e o CONTEÚDO esperados para cada objeção, mantenha a mesma intenção e conteúdo, mas adapte a linguagem ao contexto da conversa. Evite repetir exatamente o mesmo texto para todos os leads.
@@ -343,6 +344,89 @@ def obter_object_id_usuario(upn: str) -> str:
     object_id = r.json().get("id")
     _object_id_cache[upn] = object_id
     return object_id
+
+
+PADRAO_HORARIO = re.compile(
+    r"\b(segunda|ter[çc]a|quarta|quinta|sexta|s[áa]bado|domingo|hoje|amanh[ãa])\b"
+    r"|\b\d{1,2}\s?[:h]\s?\d{0,2}\b",
+    re.IGNORECASE
+)
+
+
+def parece_ter_horario(texto: str) -> bool:
+    """Filtro barato (regex, sem chamar Claude) pra decidir se vale a pena
+    tentar converter a mensagem numa data/hora — evita gastar uma chamada
+    de parse_preferencia_datetime (que usa Claude) em toda mensagem."""
+    return bool(PADRAO_HORARIO.search(texto or ""))
+
+
+def buscar_eventos_do_dia_organizador(dt_dia: datetime) -> list:
+    """Busca os eventos reais do dia inteiro na agenda do organizador
+    (Everton) via Microsoft Graph — 1 chamada só, depois os slots livres
+    são calculados localmente em Python (barato, sem nova chamada por
+    horário candidato). Retorna lista de (inicio, fim), datetimes naive
+    em horário de Brasília. Levanta exceção se a chamada falhar (quem
+    chama decide o fail-safe)."""
+    token = obter_token_azure()
+    headers = {"Authorization": f"Bearer {token}", "Prefer": 'outlook.timezone="America/Sao_Paulo"'}
+    inicio_dia = dt_dia.replace(hour=0, minute=0, second=0, microsecond=0)
+    fim_dia = inicio_dia + timedelta(days=1)
+    params = {
+        "startDateTime": inicio_dia.strftime("%Y-%m-%dT%H:%M:%S"),
+        "endDateTime": fim_dia.strftime("%Y-%m-%dT%H:%M:%S"),
+        "$select": "subject,start,end",
+        "$top": "50",
+    }
+    r = requests.get(f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/calendarView",
+                      headers=headers, params=params, timeout=20)
+    r.raise_for_status()
+    eventos = []
+    for ev in r.json().get("value", []):
+        try:
+            ini = datetime.strptime(ev["start"]["dateTime"][:19], "%Y-%m-%dT%H:%M:%S")
+            fim = datetime.strptime(ev["end"]["dateTime"][:19], "%Y-%m-%dT%H:%M:%S")
+            eventos.append((ini, fim))
+        except Exception:
+            continue
+    return eventos
+
+
+def checar_e_sugerir_horario(dt_pedido: datetime, duracao_min: int = 30):
+    """Checa a agenda REAL do organizador (Outlook/Teams, via Graph) pro
+    horário pedido pelo lead. Se estiver livre, retorna (True, []). Se
+    estiver ocupado, procura até 2 horários livres no MESMO dia (passos de
+    15 min, alternando pra frente e pra trás a partir do pedido, dentro do
+    horário comercial 9h-17h) e retorna (False, [alternativas]).
+    Fail-safe: se a chamada à agenda falhar por qualquer motivo (API fora,
+    permissão, etc.), assume disponível — nunca bloqueia o agendamento por
+    causa de um erro técnico aqui."""
+    try:
+        eventos = buscar_eventos_do_dia_organizador(dt_pedido)
+    except Exception as e:
+        print(f"[disponibilidade] Erro ao buscar agenda real, assumindo disponível: {e}", flush=True)
+        return True, []
+
+    fim_pedido = dt_pedido + timedelta(minutes=duracao_min)
+
+    def livre(dt):
+        fim = dt + timedelta(minutes=duracao_min)
+        if not (9 <= dt.hour < 17):
+            return False
+        return all(not (dt < ev_fim and fim > ev_ini) for ev_ini, ev_fim in eventos)
+
+    if livre(dt_pedido):
+        return True, []
+
+    alternativas = []
+    for passo in range(1, 25):  # até 6h de distância, 15 em 15 min
+        for cand in (dt_pedido + timedelta(minutes=15 * passo), dt_pedido - timedelta(minutes=15 * passo)):
+            if cand.date() != dt_pedido.date():
+                continue
+            if livre(cand) and cand not in alternativas:
+                alternativas.append(cand)
+            if len(alternativas) >= 2:
+                return False, alternativas
+    return False, alternativas
 
 
 def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
@@ -1014,9 +1098,13 @@ def resolver_campo_agendada_por():
     return _campo_agendada_por_cache
 
 
-def parse_preferencia_datetime(preferencia: str):
+def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
     """Converte a preferência do lead ('terça às 12h10') em ISO usando o Claude,
-    que já recebe a data atual de Brasília no system. Retorna ISO ou None."""
+    que já recebe a data atual de Brasília no system. Retorna ISO ou None.
+    tipo: rótulo pro rastreamento de custo por hora (ver [usage-hora]) —
+    "agendamento" quando chamado no fechamento do CRM, "disponibilidade"
+    quando chamado na checagem em tempo real de agenda (11/08), pra não
+    misturar esse custo com o de "chat" nem esconder ele lá dentro."""
     if not preferencia or not preferencia.strip():
         return None
     try:
@@ -1028,7 +1116,7 @@ def parse_preferencia_datetime(preferencia: str):
             "Responda APENAS o ISO ou INDEFINIDA, nada mais.\n\n"
             f"Preferência: {preferencia}"
         )
-        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30).strip()
+        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30, tipo=tipo).strip()
         if "INDEFINIDA" in resp.upper():
             return None
         datetime.strptime(resp[:16], "%Y-%m-%dT%H:%M")
@@ -1240,31 +1328,45 @@ def registrar_no_crm(conv, conversation_id, contact_name):
                 return
         deal_id = deal.get("id")
 
+        # ── Guard durável contra restart do processo (bug real: caso Walter,
+        # 11/08) ──────────────────────────────────────────────────────────
+        # conv["crm_registrado"] é só RAM — se o processo reiniciar (ex:
+        # redeploy) entre o registro original e uma retomada da mesma
+        # conversa, esse flag reseta e o ciclo inteiro roda de novo: duplica
+        # a tarefa de reunião no Agendor E, pior, cria uma SEGUNDA reunião
+        # real no Teams e manda um SEGUNDO link pro lead, diferente do que
+        # já foi combinado (aconteceu de verdade). A marca da nota (que
+        # sobrevive no Agendor, não em RAM) serve de prova durável de que
+        # esse ciclo já rodou antes — se existir, pula tudo, sem excecão.
+        nota_marcador = f"[luca:nota:{conversation_id}]"
+        if deal_tem_marca(deal_id, nota_marcador):
+            print(f"[crm] Já registrado antes (marca de nota já existe no Agendor) "
+                  f"deal={deal_id} conv={conversation_id} — pulando ciclo inteiro, "
+                  f"inclusive criação de reunião no Teams", flush=True)
+            conv["crm_registrado"] = True
+            return
+
         # ── Completa nome/e-mail da pessoa no Agendor, se estiverem faltando
         # ou genéricos (ex: nome só do WhatsApp, sem e-mail) ─────────────────
         nome_pessoa = d.get("nome") or contact_name
         email_pessoa = d.get("email", "")
         atualizar_pessoa_se_incompleta(person, nome_pessoa, email_pessoa)
 
-        # ── 1. Nota: resumo do lead (idempotente) ────────────────────────────
-        nota_marcador = f"[luca:nota:{conversation_id}]"
-        if deal_tem_marca(deal_id, nota_marcador):
-            print(f"[crm] Nota já existe (idempotência) deal={deal_id} conv={conversation_id}", flush=True)
-        else:
-            nota = (
-                "📋 Atendimento via Luca (WhatsApp)\n"
-                f"Nome: {d.get('nome') or contact_name}\n"
-                f"Segmento: {d.get('segmento', '')}\n"
-                f"Necessidade: {d.get('necessidade', '')}\n"
-                f"E-mail: {d.get('email', '')}\n"
-                f"Preferência de reunião: {d.get('preferencia', '')}\n"
-                f"Status: {d.get('status', '')}\n"
-                f"{nota_marcador}"
-            )
-            r1 = requests.post(f"{AGENDOR_BASE}/deals/{deal_id}/tasks",
-                               headers={**HEADERS, "Content-Type": "application/json"},
-                               json={"text": nota}, timeout=15)
-            print(f"[crm] Nota resumo deal={deal_id} status={r1.status_code}", flush=True)
+        # ── 1. Nota: resumo do lead ───────────────────────────────────────
+        nota = (
+            "📋 Atendimento via Luca (WhatsApp)\n"
+            f"Nome: {d.get('nome') or contact_name}\n"
+            f"Segmento: {d.get('segmento', '')}\n"
+            f"Necessidade: {d.get('necessidade', '')}\n"
+            f"E-mail: {d.get('email', '')}\n"
+            f"Preferência de reunião: {d.get('preferencia', '')}\n"
+            f"Status: {d.get('status', '')}\n"
+            f"{nota_marcador}"
+        )
+        r1 = requests.post(f"{AGENDOR_BASE}/deals/{deal_id}/tasks",
+                           headers={**HEADERS, "Content-Type": "application/json"},
+                           json={"text": nota}, timeout=15)
+        print(f"[crm] Nota resumo deal={deal_id} status={r1.status_code}", flush=True)
 
         # ── 2. Registro WhatsApp: transcrição compacta (idempotente) ─────────
         transcricao_marcador = f"[luca:transcricao:{conversation_id}]"
@@ -1783,7 +1885,47 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
         # Ativa "digitando..." enquanto o Claude processa
         toggle_typing(inbox_identifier, contact_identifier, conversation_id, "on")
 
-        reply = call_claude(conv["messages"], max_tokens=300, system=conv["system"], tipo="chat")
+        # ── Checagem real de agenda antes de responder (11/08) ────────────
+        # Se a mensagem do lead parece conter um dia/horário, converte pra
+        # data real e checa a agenda de verdade do consultor (Outlook/
+        # Teams via Graph) — não só as tarefas do Agendor, que é o que a
+        # gente já checava antes só no fechamento do CRM (tarde demais pra
+        # sugerir troca). Se ocupado, injeta instrução pra ESTA resposta
+        # sugerir até 2 alternativas no mesmo dia, sem revelar que "checou
+        # a agenda" (mantém a regra do SYSTEM_PROMPT sobre isso). Filtro
+        # regex barato evita chamar o Claude (parse_preferencia_datetime)
+        # em mensagem que claramente não menciona horário.
+        extra_disponibilidade = ""
+        if parece_ter_horario(message_text):
+            try:
+                dt_iso_tentativa = parse_preferencia_datetime(message_text, tipo="disponibilidade")
+                if dt_iso_tentativa:
+                    dt_pedido = datetime.strptime(dt_iso_tentativa, "%Y-%m-%dT%H:%M")
+                    livre, alternativas = checar_e_sugerir_horario(dt_pedido)
+                    if not livre:
+                        if alternativas:
+                            opcoes = " ou ".join(a.strftime("%Hh%M") for a in alternativas)
+                            extra_disponibilidade = (
+                                f"\n\nATENÇÃO (checagem real de agenda, não mencione isso ao lead): "
+                                f"o horário {dt_pedido.strftime('%Hh%M')} que o lead acabou de pedir já "
+                                f"está ocupado na agenda do consultor. Em vez de anotar esse horário, "
+                                f"sugira estas duas opções no mesmo dia: {opcoes}. Se o lead disser que "
+                                f"não pode em nenhuma das duas, aceite o horário original mesmo assim, "
+                                f"sem insistir mais."
+                            )
+                        else:
+                            extra_disponibilidade = (
+                                f"\n\nATENÇÃO (checagem real de agenda, não mencione isso ao lead): não "
+                                f"achei horário livre nesse dia pra sugerir. Aceite a preferência do lead "
+                                f"normalmente."
+                            )
+                        print(f"[disponibilidade] Horário {dt_pedido.strftime('%Y-%m-%d %H:%M')} ocupado, "
+                              f"{len(alternativas)} alternativa(s) sugerida(s) conv={conversation_id}", flush=True)
+            except Exception as e:
+                print(f"[disponibilidade] Erro ao checar/sugerir horário conv={conversation_id}: {e}", flush=True)
+
+        reply = call_claude(conv["messages"], max_tokens=300,
+                             system=conv["system"] + extra_disponibilidade, tipo="chat")
 
         # Desativa "digitando..."
         toggle_typing(inbox_identifier, contact_identifier, conversation_id, "off")
