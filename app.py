@@ -297,7 +297,7 @@ CALENDAR_USER       = os.environ.get("CALENDAR_USER",       "ronaldojunior@lucra
 TEAMS_ORGANIZADOR = os.environ.get("TEAMS_ORGANIZADOR", "evertonsilva@lucralize.com.br")
 TEAMS_COPIA = [
     e.strip() for e in os.environ.get(
-        "TEAMS_COPIA", "ronaldojunior@lucralize.com.br,luizsantos@lucralize.com.br"
+        "TEAMS_COPIA", "ronaldojunior@lucralize.com.br"
     ).split(",") if e.strip()
 ]
 
@@ -324,11 +324,33 @@ def obter_token_azure() -> str:
     return _azure_token_cache["token"]
 
 
+_object_id_cache = {}
+
+
+def obter_object_id_usuario(upn: str) -> str:
+    """Resolve o Object ID (GUID) do usuário no Entra ID a partir do
+    e-mail/UPN, com cache. Necessário porque a consulta de onlineMeetings
+    por JoinWebUrl pode falhar quando se usa o e-mail/UPN diretamente no
+    lugar do Object ID — mesmo que outros endpoints da Graph (como
+    /events, que já funciona) aceitem o UPN sem problema. Achado real,
+    reportado pela comunidade Microsoft (11/08)."""
+    if upn in _object_id_cache:
+        return _object_id_cache[upn]
+    token = obter_token_azure()
+    r = requests.get(f"https://graph.microsoft.com/v1.0/users/{upn}?$select=id",
+                      headers={"Authorization": f"Bearer {token}"}, timeout=15)
+    r.raise_for_status()
+    object_id = r.json().get("id")
+    _object_id_cache[upn] = object_id
+    return object_id
+
+
 def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
                           linha_negocio: str = "contabilidade", duracao_min: int = 30) -> dict:
     """Cria a reunião de verdade no Teams via Microsoft Graph, com:
       - Organizador: TEAMS_ORGANIZADOR (Everton, por padrão)
-      - Convidados em cópia: TEAMS_COPIA (Ronaldo + Luiz, por padrão)
+      - Convidados em cópia: TEAMS_COPIA (só Ronaldo, por padrão — Luiz
+        removido temporariamente em 11/08, estava recebendo e-mail demais)
       - Convidado externo: o lead (obrigatório, recebe o convite por e-mail)
     duracao_min: 30 min por padrão (confirmado com Ronaldo em 11/08) — é
     margem de segurança na agenda, não é o que se promete ao lead na
@@ -387,22 +409,27 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
     # onlineMeeting de verdade filtrando pelo joinWebUrl antes de dar PATCH.
     try:
         if join_url:
+            # Resolve o Object ID do organizador — a consulta de onlineMeetings
+            # por JoinWebUrl pode falhar usando UPN/e-mail direto (achado real,
+            # 11/08). Isso é diferente do /events (criação da reunião em si),
+            # que já funciona normalmente com UPN.
+            object_id = obter_object_id_usuario(TEAMS_ORGANIZADOR)
             # O join_url já vem com trechos percent-encoded de propósito (faz
             # parte do formato válido do link do Teams, ex: %3a, %40) — NÃO
             # pode ser codificado de novo, ou vira %253a/%2540 e quebra o
-            # filtro (foi exatamente esse o bug do 400 nas duas tentativas
-            # anteriores). Só o espaço do "eq" precisa de escape aqui.
+            # filtro (foi o bug das duas tentativas anteriores). Só o espaço
+            # do "eq" precisa de escape aqui.
             filtro = f"JoinWebUrl eq '{join_url}'".replace(" ", "%20")
             busca = requests.get(
-                f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings?$filter={filtro}",
+                f"https://graph.microsoft.com/v1.0/users/{object_id}/onlineMeetings?$filter={filtro}",
                 headers=headers, timeout=15
             )
             busca.raise_for_status()
             resultados = busca.json().get("value") or []
             if resultados:
                 meeting_id = resultados[0].get("id")
-                requests.patch(
-                    f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings/{meeting_id}",
+                patch_resp = requests.patch(
+                    f"https://graph.microsoft.com/v1.0/users/{object_id}/onlineMeetings/{meeting_id}",
                     headers=headers,
                     # "recordAutomatically" tem razoável confirmação na doc da
                     # Graph. "transcribeAutomatically" é palpite, baseado na
@@ -411,6 +438,12 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
                     json={"recordAutomatically": True, "transcribeAutomatically": True},
                     timeout=15
                 )
+                patch_resp.raise_for_status()
+                print(f"[teams] ✅ Gravação/transcrição automática configurada com sucesso, "
+                      f"meeting_id={meeting_id}", flush=True)
+            else:
+                print(f"[teams] Busca do onlineMeeting não retornou nenhum resultado "
+                      f"pra join_url={join_url}", flush=True)
     except Exception as e:
         print(f"[teams] Gravação/transcrição automática não confirmada (não bloqueia o agendamento): {e}", flush=True)
 
