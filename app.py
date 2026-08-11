@@ -325,11 +325,15 @@ def obter_token_azure() -> str:
 
 
 def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
-                          linha_negocio: str = "contabilidade", duracao_min: int = 20) -> dict:
+                          linha_negocio: str = "contabilidade", duracao_min: int = 30) -> dict:
     """Cria a reunião de verdade no Teams via Microsoft Graph, com:
       - Organizador: TEAMS_ORGANIZADOR (Everton, por padrão)
       - Convidados em cópia: TEAMS_COPIA (Ronaldo + Luiz, por padrão)
       - Convidado externo: o lead (obrigatório, recebe o convite por e-mail)
+    duracao_min: 30 min por padrão (confirmado com Ronaldo em 11/08) — é
+    margem de segurança na agenda, não é o que se promete ao lead na
+    conversa (o SYSTEM_PROMPT continua dizendo "20 minutinhos" de propósito,
+    a diferença cobre atraso no início/fim e evita sobrepor com a próxima).
     start_iso: horário de Brasília, formato "2026-08-12T14:00:00" (sem timezone).
     linha_negocio: "tech" ou "contabilidade", decide o título da reunião
     ("Videochamada Lucralize Tech - Nome Sobrenome" ou "... Contabilidade -
@@ -384,7 +388,7 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
     try:
         if join_url:
             import urllib.parse
-            filtro = urllib.parse.quote(f"JoinWebUrl eq '{join_url}'")
+            filtro = urllib.parse.quote(f"joinWebUrl eq '{join_url}'")
             busca = requests.get(
                 f"https://graph.microsoft.com/v1.0/users/{TEAMS_ORGANIZADOR}/onlineMeetings?$filter={filtro}",
                 headers=headers, timeout=15
@@ -1146,6 +1150,18 @@ def ajustar_horario_reuniao(dt_desejado, owner_id):
     return dt_desejado, False
 
 
+def detectar_linha_negocio(segmento: str) -> str:
+    """Mapeia o texto livre extraído no campo 'segmento' pra 'tech' ou
+    'contabilidade', com base em palavras-chave observadas nos dados reais
+    (ex: 'Tecnologia', 'Fintech / Criptomoedas', 'Desenvolvedor/Freelancer
+    Tech'). Fallback pra 'contabilidade' quando não bate com nenhuma —
+    é a linha de negócio padrão/majoritária da empresa."""
+    s = (segmento or "").lower()
+    palavras_tech = ["tech", "tecnolog", "dev", "fintech", "software",
+                      "freelancer", "startup", "saas", "app "]
+    return "tech" if any(p in s for p in palavras_tech) else "contabilidade"
+
+
 def registrar_no_crm(conv, conversation_id, contact_name):
     """Fecha o ciclo no Agendor quando a qualificação conclui:
     0. Se pessoa/negócio não existirem no CRM ainda, cria os dois primeiro
@@ -1240,6 +1256,7 @@ def registrar_no_crm(conv, conversation_id, contact_name):
             owner_id = (deal.get("owner") or {}).get("id")
             dt_iso = parse_preferencia_datetime(preferencia)
             owner_id_int = int(owner_id) if owner_id else None
+            teams_join_url = None
             if dt_iso:
                 dt_pedido = datetime.strptime(dt_iso, "%Y-%m-%dT%H:%M")
                 dt_local, ajustado = ajustar_horario_reuniao(dt_pedido, owner_id_int)
@@ -1248,6 +1265,39 @@ def registrar_no_crm(conv, conversation_id, contact_name):
                 if ajustado:
                     texto_reuniao += (f" (horário ajustado de {dt_pedido.strftime('%H:%M')} para "
                                        f"{dt_local.strftime('%H:%M')} para evitar conflito de agenda)")
+
+                # ── Cria a reunião real no Teams e manda o link pro lead ─────
+                # Só quando há data/hora de verdade confirmada (não no
+                # fallback "HORÁRIO A CONFIRMAR" do else abaixo) e o lead já
+                # deu e-mail — sem e-mail não dá pra convidar ele pro Teams.
+                # Falha aqui NUNCA bloqueia o resto do registro no CRM (fica
+                # no mesmo fluxo manual de antes: consultor confirma e manda
+                # o link depois).
+                email_lead = (d.get("email") or "").strip()
+                if email_lead:
+                    try:
+                        linha_negocio = detectar_linha_negocio(d.get("segmento", ""))
+                        nome_reuniao = d.get("nome") or contact_name or "Lead"
+                        start_teams = dt_local.strftime("%Y-%m-%dT%H:%M:%S")
+                        resultado_teams = create_teams_meeting(nome_reuniao, email_lead, start_teams, linha_negocio)
+                        teams_join_url = resultado_teams.get("join_url")
+                        if teams_join_url:
+                            texto_reuniao += f"\nLink da reunião (Teams): {teams_join_url}"
+                            print(f"[crm] ✅ Reunião Teams criada deal={deal_id} "
+                                  f"linha={linha_negocio} join_url={teams_join_url}", flush=True)
+                            mensagem_link = (
+                                f"Consegui deixar tudo pronto, {nome_reuniao.split(' ')[0]}! Aqui está o link "
+                                f"da nossa videochamada:\n{teams_join_url}\n\nQualquer dúvida antes, estou por aqui."
+                            )
+                            send_agendorchat_message(conversation_id, remover_travessao(mensagem_link))
+                        else:
+                            print(f"[crm] Reunião Teams criada mas sem join_url deal={deal_id}", flush=True)
+                    except Exception as e:
+                        print(f"[crm] Erro ao criar reunião no Teams deal={deal_id}: {e} — "
+                              f"seguindo sem o link automático (consultor confirma manualmente)", flush=True)
+                else:
+                    print(f"[crm] Sem e-mail do lead — não foi possível criar reunião automática "
+                          f"no Teams deal={deal_id} (consultor confirma manualmente)", flush=True)
             else:
                 prox = datetime.utcnow() - timedelta(hours=3) + timedelta(days=1)
                 while prox.weekday() >= 5:
