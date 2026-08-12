@@ -410,7 +410,16 @@ def checar_e_sugerir_horario(dt_pedido: datetime, duracao_min: int = 30):
 
     def livre(dt):
         fim = dt + timedelta(minutes=duracao_min)
-        if not (9 <= dt.hour < 17):
+        # Segunda a quinta (weekday 0-3): 9h-17h. Sexta (weekday 4): 9h-16h30,
+        # fecha mais cedo (mesma regra já documentada no contexto do
+        # SYSTEM_PROMPT — corrigido em 12/08, essa checagem usava 17h pra
+        # todo dia, o que podia considerar sexta 16h45 como "disponível").
+        if dt.weekday() == 4:
+            fecha = dt.replace(hour=16, minute=30, second=0, microsecond=0)
+        else:
+            fecha = dt.replace(hour=17, minute=0, second=0, microsecond=0)
+        abre = dt.replace(hour=9, minute=0, second=0, microsecond=0)
+        if not (abre <= dt < fecha):
             return False
         return all(not (dt < ev_fim and fim > ev_ini) for ev_ini, ev_fim in eventos)
 
@@ -3262,34 +3271,22 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
         return True  # fail-safe: em erro, assume que já teve humano — nunca marca perdido por engano
 
 
-def marcar_perdido_sem_contato(deal_id: int) -> bool:
-    """Move o negócio para o status/motivo 'PERDIDO - SEM CONTATO'.
+ETAPA_PERDIDO_SEM_CONTATO = 3650939  # confirmado via JSON real da API, 12/08
 
-    ⚠️ NÃO ATIVAR EM PRODUÇÃO sem confirmar antes com o suporte do Agendor
-    (ou testando num negócio de mentira) o endpoint e o payload exatos —
-    mesmo cuidado que já foi necessário com due_date, dealStage e
-    assigned_users, que tinham nomes/formatos diferentes do documentado.
-    O que está abaixo é a melhor hipótese com base no padrão da API v3
-    (endpoint /deals/{id}/status, dealStatus 3 = perdido, já confirmado em
-    uso em outras partes do código), mas o campo do MOTIVO de perda
-    ("lostReason") não foi testado — motivos de perda costumam ter uma
-    lista fixa de IDs cadastrados na conta, pode não ser texto livre."""
-    if not deal_id:
-        return False
-    try:
-        payload = {
-            "dealStatus": 3,  # 3 = perdido — já confirmado em uso no dashboard
-            "lostReason": "PERDIDO - SEM CONTATO",  # NOME/CAMPO NÃO CONFIRMADO — testar antes de confiar
-        }
-        r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/status",
-                          headers={**HEADERS, "Content-Type": "application/json"},
-                          json=payload, timeout=15)
-        print(f"[followup_dias] Marcado PERDIDO - SEM CONTATO deal={deal_id} "
-              f"status={r.status_code} resp={r.text[:200]}", flush=True)
-        return r.status_code in (200, 201)
-    except Exception as e:
-        print(f"[followup_dias] Erro ao marcar perdido deal={deal_id}: {e}", flush=True)
-        return False
+
+def marcar_perdido_sem_contato(deal_id: int) -> bool:
+    """Move o negócio pra etapa 'Perdido - sem contato (D5)', dentro do
+    próprio Funil Comercial.
+
+    Corrigido em 12/08: a versão anterior usava PUT /deals/{id}/status com
+    dealStatus=3 + lostReason (nunca confirmado, campo/formato incerto).
+    Ronaldo mostrou que "Perdido - sem contato (D5)" é uma ETAPA própria
+    do funil agora (confirmado via JSON real da API: id=3650939, posição 5,
+    logo depois de '3° Contato (D3)'), não um status/motivo separado. Isso
+    elimina toda a incerteza anterior — usa o mesmo mecanismo de mover
+    etapa que já é testado e confiável em produção (mover_etapa_funil_comercial),
+    em vez de um endpoint/payload que nunca foi validado."""
+    return mover_etapa_funil_comercial(deal_id, ETAPA_PERDIDO_SEM_CONTATO)
 
 
 def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
@@ -3297,13 +3294,17 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     do WhatsApp certamente está fechada (o lead está silencioso há 1+ dia),
     então isso SEMPRE usa template aprovado da Meta, nunca mensagem livre.
 
-    ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5) ainda NÃO existem —
-    precisam ser criados e aprovados no Meta Business Suite antes de
-    ativar FOLLOWUP_ATIVOS, igual já foi feito pros templates de lembrete
-    de reunião. Os nomes aqui são só sugestão."""
-    nome_template = {"D1": "followup_silencio_d1",
-                      "D3": "followup_silencio_d3",
-                      "D5": "followup_silencio_d5"}[tag]
+    Só usa os templates Tech (12/08, decisão de Ronaldo: manter só Tech por
+    ora, os da Contabilidade não foram escritos e não serão usados agora).
+
+    ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5_tech) ainda NÃO
+    existem no Meta Business Suite — precisam ser criados e aprovados
+    antes de ativar FOLLOWUP_ATIVOS, igual já foi feito pros templates de
+    lembrete de reunião. O texto já está fechado (ver histórico da
+    sessão), falta só submeter."""
+    nome_template = {"D1": "followup_silencio_d1_tech",
+                      "D3": "followup_silencio_d3_tech",
+                      "D5": "followup_silencio_d5_tech"}[tag]
     tpl = template_por_nome(nome_template)
     if not tpl:
         send_private_note(conversation_id, (
@@ -3394,9 +3395,9 @@ def verificar_followup_dias_silencio():
                                        and conversa_parece_estagnada(conv_id_r):
                                         nome_r = (person_r.get("name") or "").strip().split(" ")[0] \
                                                  if person_r.get("name") else ""
-                                        texto = (f"Oi{', ' + nome_r if nome_r else ''}! Passando pra saber se "
-                                                 f"ficou alguma dúvida ou se posso te ajudar com mais alguma coisa "
-                                                 f"por aqui. 😊")
+                                        texto = (f"Oi{', ' + nome_r if nome_r else ''}! Acho que te peguei num "
+                                                 f"momento ruim. Qual o melhor horário pra a gente continuar "
+                                                 f"esse papo hoje?")
                                         send_agendorchat_message(conv_id_r, texto)
                                         send_private_note(conv_id_r, "🔁 Reforço do mesmo dia (D0) enviado ao "
                                                                        "lead. [followup:reforco_d0]")
