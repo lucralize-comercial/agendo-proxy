@@ -1040,28 +1040,40 @@ def buscar_pessoa_e_negocio(phone):
     DO FUNIL COMERCIAL (ignora negócios de outros funis, ex: Reativação,
     Jurídico, Legalização). Retorna (person, deal) ou (person, None) se a
     pessoa existir mas não tiver negócio no Funil Comercial, ou (None, None)
-    se a pessoa nem existir."""
+    se a pessoa nem existir.
+
+    Correção de 12/08 (caso real confirmado): o mesmo telefone pode ter
+    MAIS DE UMA pessoa cadastrada no Agendor (contato duplicado — ex:
+    "Everton Pereira" e "Everton - via Luca (WhatsApp)" como registros
+    separados). A versão anterior só olhava a primeira pessoa retornada
+    pela busca; se o negócio ativo no Funil Comercial estivesse na
+    SEGUNDA pessoa, a função nunca achava, tentava criar um negócio novo,
+    e isso já causou falha real no fluxo (reunião/link não gerados)."""
     phone_clean = phone.replace("+", "").replace(" ", "").strip()
     r = requests.get(f"{AGENDOR_BASE}/people", headers=HEADERS,
                      params={"phone": phone_clean}, timeout=15)
     pessoas = r.json().get("data", [])
     if not pessoas:
         return None, None
-    person = pessoas[0]
+
     # IMPORTANTE: GET /deals?personId=X ignora o filtro e devolve negócios de
     # QUALQUER pessoa (bug confirmado na API) — usa o endpoint aninhado, que
     # filtra corretamente.
-    r2 = requests.get(f"{AGENDOR_BASE}/people/{person.get('id')}/deals", headers=HEADERS, timeout=15)
-    deals = r2.json().get("data", [])
-    deals_comercial = [
-        d for d in deals
-        if ((d.get("dealStage") or {}).get("funnel") or {}).get("id") == FUNIL_COMERCIAL_ID
-        and not d.get("wonAt") and not d.get("lostAt")  # ignora negócios já ganhos/perdidos
-    ]
-    if not deals_comercial:
-        return person, None
-    deal = sorted(deals_comercial, key=lambda d: d.get("createdAt", ""), reverse=True)[0]
-    return person, deal
+    for person in pessoas:
+        r2 = requests.get(f"{AGENDOR_BASE}/people/{person.get('id')}/deals", headers=HEADERS, timeout=15)
+        deals = r2.json().get("data", [])
+        deals_comercial = [
+            d for d in deals
+            if ((d.get("dealStage") or {}).get("funnel") or {}).get("id") == FUNIL_COMERCIAL_ID
+            and not d.get("wonAt") and not d.get("lostAt")  # ignora negócios já ganhos/perdidos
+        ]
+        if deals_comercial:
+            deal = sorted(deals_comercial, key=lambda d: d.get("startTime", ""), reverse=True)[0]
+            return person, deal
+
+    # Nenhuma das pessoas encontradas tem negócio ativo no Funil Comercial —
+    # retorna a primeira mesmo (comportamento anterior pra esse caso).
+    return pessoas[0], None
 
 
 _campo_agendada_por_cache = None
@@ -1129,12 +1141,23 @@ def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
 def criar_negocio_funil_comercial(person_id, nome: str):
     """Cria um negócio no Funil Comercial (etapa Novo Lead) pra uma pessoa
     que JÁ EXISTE no Agendor (ex: tem negócio só em outro funil). Retorna
-    o deal criado ou None."""
+    o deal criado ou None.
+
+    Rede de segurança (12/08): se a criação falhar porque JÁ EXISTE um
+    negócio com esse título pra essa pessoa (erro real observado: "There
+    can only be one deal with this title for this organization/person"):
+      - Se esse negócio existente ainda está ATIVO (não ganho/perdido),
+        reaproveita ele — é o mesmo negócio de verdade, só o título colidiu.
+      - Se esse negócio existente já está GANHO ou PERDIDO, NÃO reaproveita
+        (Ronaldo confirmou: nesse caso precisa criar um negócio novo de
+        verdade) — em vez disso, tenta de novo com um sufixo sequencial
+        limpo: "(1)", "(2)", "(3)"... pegando o primeiro número livre."""
     nome_final = nome or "Lead via Luca (WhatsApp)"
     ETAPA_NOVO_LEAD_ID = 2835663
+    titulo = f"{nome_final} - via Luca (WhatsApp)"
     try:
         payload_deal = {
-            "title": f"{nome_final} - via Luca (WhatsApp)",
+            "title": titulo,
             "dealStageId": ETAPA_NOVO_LEAD_ID,
         }
         rd = requests.post(f"{AGENDOR_BASE}/people/{person_id}/deals",
@@ -1143,6 +1166,39 @@ def criar_negocio_funil_comercial(person_id, nome: str):
         print(f"[crm] Criação de negócio (pessoa já existia) status={rd.status_code} body={rd.text[:300]}", flush=True)
         if rd.status_code in (200, 201):
             return rd.json().get("data") or rd.json()
+        if rd.status_code == 400 and "one deal with this title" in rd.text:
+            r2 = requests.get(f"{AGENDOR_BASE}/people/{person_id}/deals", headers=HEADERS, timeout=15)
+            deals = r2.json().get("data", [])
+            existente = next((d for d in deals if d.get("title") == titulo), None)
+            if existente and not existente.get("wonAt") and not existente.get("lostAt"):
+                print(f"[crm] Negócio existente com esse título está ATIVO — reaproveitando "
+                      f"deal={existente.get('id')}", flush=True)
+                return existente
+            print(f"[crm] Negócio existente com esse título está ganho/perdido — criando "
+                  f"negócio novo de verdade, com sufixo sequencial", flush=True)
+            # Acha o primeiro número livre entre parênteses, olhando os
+            # títulos já usados por essa pessoa (ex: "... (1)", "... (2)")
+            numeros_usados = set()
+            for d in deals:
+                t = d.get("title") or ""
+                if t == titulo:
+                    numeros_usados.add(0)
+                elif t.startswith(f"{titulo} (") and t.endswith(")"):
+                    try:
+                        numeros_usados.add(int(t[len(titulo) + 2:-1]))
+                    except ValueError:
+                        pass
+            proximo = 1
+            while proximo in numeros_usados:
+                proximo += 1
+            payload_deal["title"] = f"{titulo} ({proximo})"
+            rd2 = requests.post(f"{AGENDOR_BASE}/people/{person_id}/deals",
+                                headers={**HEADERS, "Content-Type": "application/json"},
+                                json=payload_deal, timeout=15)
+            print(f"[crm] Criação de negócio com título único status={rd2.status_code} "
+                  f"body={rd2.text[:300]}", flush=True)
+            if rd2.status_code in (200, 201):
+                return rd2.json().get("data") or rd2.json()
     except Exception as e:
         print(f"[crm] Erro ao criar negócio pra pessoa existente: {e}", flush=True)
     return None
@@ -1790,7 +1846,7 @@ def preencher_origem_whatsapp_pagina(phone):
             print(f"[origem] Nenhum negócio encontrado para person_id={person_id}", flush=True)
             return
         # Pega o negócio mais recente
-        deal = sorted(deals, key=lambda d: d.get("createdAt",""), reverse=True)[0]
+        deal = sorted(deals, key=lambda d: d.get("startTime",""), reverse=True)[0]
         deal_id = deal.get("id")
         description = (deal.get("description") or "").strip()
         # Só preenche se descrição vazia
