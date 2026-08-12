@@ -2880,7 +2880,9 @@ def varredura_lembretes():
 
 def mover_novos_leads_para_1contato():
     """Move negócios parados em 'Novo Lead' (Funil Comercial) para
-    '1º Contato (D0)' — sem condição, sempre que encontrar um.
+    '1º Contato (D0)' — mas só quando a saudação automática realmente já
+    foi enviada de verdade (confirmado checando a conversa real, não
+    assumido pelo simples fato do negócio estar em 'Novo Lead').
 
     Confirmado com print real da automação nativa (12/08): o gatilho dela é
     "quando um negócio chegar à etapa 1. Novo Lead" — ela dispara a
@@ -2921,7 +2923,34 @@ def mover_novos_leads_para_1contato():
     movidos = 0
     for d in candidatos:
         deal_id = d.get("id")
+        person = d.get("person") or {}
+        person_id = person.get("id")
         try:
+            # Só move se a saudação automática realmente foi enviada de
+            # verdade — checa a conversa real, não assume pelo simples fato
+            # do negócio estar em "Novo Lead" (correção de 12/08, a Ronaldo
+            # pediu essa confirmação: sem isso, o rótulo podia avançar
+            # mesmo que a automação nativa tivesse falhado por qualquer
+            # motivo — telefone inválido, automação desativada, etc.).
+            if not person_id:
+                continue
+            telefone = telefone_da_pessoa(person_id)
+            if not telefone:
+                continue
+            conv = conversa_do_telefone(telefone)
+            if not conv:
+                continue
+            msgs = mensagens_da_conversa(conv["id"])
+            saudacao_enviada = any(
+                m.get("message_type") == 1 and not m.get("private")
+                and (m.get("additional_attributes") or {}).get("automation_id")
+                for m in msgs
+            )
+            if not saudacao_enviada:
+                print(f"[novo_lead] Pulado — saudação ainda não confirmada na conversa "
+                      f"deal={deal_id}", flush=True)
+                continue
+
             r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/stage",
                               headers={**HEADERS, "Content-Type": "application/json"},
                               json={"dealStage": SEQUENCIA_1_CONTATO}, timeout=15)
