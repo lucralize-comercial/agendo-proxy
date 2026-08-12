@@ -1870,6 +1870,19 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                 conv["messages"] = remote_history
                 print(f"[history] Histórico atualizado após delay: {len(remote_history)} msgs conv={conversation_id}", flush=True)
             # Injeta instrução para não repetir o que o template já disse
+            # Se o template de boas-vindas ficou como ÚLTIMO turno (acontece
+            # quando o lead manda só 1 mensagem e não escreve de novo durante
+            # os 90s de espera), a Messages API interpreta isso como
+            # "continue esse turno do assistant" em vez de "responda de
+            # novo" — e como o template já é uma frase fechada, o resultado
+            # é resposta vazia, sempre (bug real confirmado: caso Millena,
+            # 12/08, 3 tentativas, todas vazias). O Claude não precisa "ver"
+            # o texto literal do template pra saber que já foi enviado, só
+            # precisa da instrução abaixo — então remove esse turno final
+            # antes de chamar, garantindo que a conversa sempre termine num
+            # turno "user" de verdade.
+            if conv["messages"] and conv["messages"][-1]["role"] == "assistant":
+                conv["messages"].pop()
             if conv["messages"] and conv["messages"][-1]["role"] == "user":
                 conv["messages"][-1]["content"] = (
                     "[ATENÇÃO: Um template de boas-vindas já foi enviado automaticamente pelo sistema antes desta resposta. "
@@ -2865,20 +2878,35 @@ def varredura_lembretes():
           f"{reunioes_futuras} reuniões futuras, {na_janela} na janela de disparo", flush=True)
 
 
-def mover_novos_leads_sem_conversa():
+def mover_novos_leads_para_1contato():
     """Move negócios parados em 'Novo Lead' (Funil Comercial) para
-    '1º Contato (D0)' quando NÃO existe conversa aberta pro telefone da
-    pessoa vinculada.
+    '1º Contato (D0)' — sem condição, sempre que encontrar um.
 
-    Contexto: a automação nativa de boas-vindas foi realocada do gatilho
-    'chegar em Novo Lead' para 'chegar em 1º Contato (D0)', porque leads
-    vindos de formulários/LPs/calculadora nascem em 'Novo Lead' e, se já
-    houver uma conversa em andamento com o Luca (o mesmo telefone convertendo
-    de novo em outra página, por exemplo), a automação disparava a saudação
-    de novo no meio do atendimento. Agora: negócio sem conversa aberta ->
-    avança pra '1º Contato (D0)' -> aciona a automação de boas-vindas
-    normalmente (fluxo de lead genuinamente novo). Negócio com conversa
-    aberta -> fica parado em 'Novo Lead' -> nunca aciona a automação."""
+    Confirmado com print real da automação nativa (12/08): o gatilho dela é
+    "quando um negócio chegar à etapa 1. Novo Lead" — ela dispara a
+    saudação assim que o negócio é criado, ANTES desta função rodar (que só
+    roda a cada 15 min). "1º Contato (D0)" é só o registro de que essa
+    primeira tentativa já foi feita; não dispara nada por si só, é esta
+    função quem move o rótulo depois que a saudação já saiu.
+
+    Histórico de decisões (12/08, com Ronaldo):
+    - Uma versão anterior tentou checar "conversa aberta" pro telefone,
+      pra evitar saudação duplicada em reconversão — não funcionava, porque
+      toda saudação abre uma conversa, então a checagem bloqueava TODO lead
+      novo, não só o cenário de reconversão (caso real: Millena, negócio
+      nunca avançava).
+    - Uma segunda versão trocou pra checar "essa pessoa já tem outro
+      negócio engajado" — mas como o gatilho da automação é "Novo Lead"
+      (não "1º Contato"), essa checagem não evita a saudação duplicada de
+      verdade (a automação já disparou antes desta função nem rodar), só
+      atrasava o rótulo à toa. Removida.
+    - Decisão final: aceitar o risco de saudação duplicada em reconversão
+      (raro, e mesmo quando acontece o Luca continua a conversa
+      normalmente pelo histórico, sem perder contexto — só fica
+      visualmente estranho pro lead ver a saudação de novo). Resolver isso
+      de verdade exigiria mover o disparo da saudação pra dentro do nosso
+      código via webhook on_deal_created, o que foi considerado mas
+      adiado por ora."""
     FUNIL_COMERCIAL_ID = 696449
     ETAPA_NOVO_LEAD_ID = 2835663
     SEQUENCIA_1_CONTATO = 2  # posição de "1º Contato (D0)" no Funil Comercial
@@ -2893,17 +2921,7 @@ def mover_novos_leads_sem_conversa():
     movidos = 0
     for d in candidatos:
         deal_id = d.get("id")
-        person = d.get("person") or {}
-        person_id = person.get("id")
-        if not person_id:
-            continue
         try:
-            phone = telefone_da_pessoa(person_id)
-            if not phone:
-                continue
-            conv = conversa_do_telefone(phone)
-            if conv and conv.get("status") == "open":
-                continue  # tem conversa aberta — deixa em Novo Lead de propósito
             r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/stage",
                               headers={**HEADERS, "Content-Type": "application/json"},
                               json={"dealStage": SEQUENCIA_1_CONTATO}, timeout=15)
@@ -2915,12 +2933,12 @@ def mover_novos_leads_sem_conversa():
     print(f"[novo_lead] varredura concluída: {len(candidatos)} em 'Novo Lead', {movidos} movidos", flush=True)
 
 
-def mover_novos_leads_sem_conversa_safe():
+def mover_novos_leads_para_1contato_safe():
     if not _flag("MOVER_NOVOS_LEADS_ATIVO", "false"):
         print("[novo_lead] varredura pulada — MOVER_NOVOS_LEADS_ATIVO desligado", flush=True)
         return
     try:
-        mover_novos_leads_sem_conversa()
+        mover_novos_leads_para_1contato()
     except Exception as e:
         print(f"[novo_lead] Erro geral na varredura: {e}", flush=True)
 
@@ -3118,17 +3136,20 @@ def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo
 
 
 def mover_para_contato_retornado_se_aplicavel(phone: str):
-    """Chamado em tempo real quando o lead manda mensagem. Se o negócio já
-    tinha escalado por silêncio (está em 2° ou 3° Contato), o retorno do
-    lead move pra 'Contato Retornado' — sinaliza pro time que esse lead
-    tinha sumido e voltou. Roda em thread separada, não atrasa a resposta
-    do Luca."""
+    """Chamado em tempo real quando o lead manda mensagem. 'Contato
+    Retornado' confirma que existe uma pessoa real do outro lado, que
+    respondeu a alguma mensagem nossa — não é uma etapa reservada só pra
+    quem sumiu e voltou depois de escalar por silêncio. Corrigido em 12/08
+    (entendimento anterior estava restrito demais, só cobria 2º/3º
+    Contato): qualquer resposta do lead enquanto o negócio está em 1º, 2º
+    ou 3º Contato já confirma engajamento real e move pra 'Contato
+    Retornado'. Roda em thread separada, não atrasa a resposta do Luca."""
     try:
         _, deal = buscar_pessoa_e_negocio(phone)
         if not deal:
             return
         etapa_atual_id = (deal.get("dealStage") or {}).get("id")
-        if etapa_atual_id in (ETAPA_2_CONTATO, ETAPA_3_CONTATO):
+        if etapa_atual_id in (ETAPA_1_CONTATO, ETAPA_2_CONTATO, ETAPA_3_CONTATO):
             mover_etapa_funil_comercial(deal["id"], ETAPA_CONTATO_RETORNADO, permitir_recuo=True)
     except Exception as e:
         print(f"[contato_retornado] Erro phone={phone}: {e}", flush=True)
@@ -3398,7 +3419,7 @@ def log_resumo_usage():
     print(f"[usage-hora] TOTAL desde o boot: ${total_usd:.4f}", flush=True)
 
 
-scheduler.add_job(mover_novos_leads_sem_conversa_safe, "interval", minutes=15, id="mover_novos_leads")
+scheduler.add_job(mover_novos_leads_para_1contato_safe, "interval", minutes=15, id="mover_novos_leads")
 scheduler.add_job(log_resumo_usage, "interval", hours=1, id="usage_resumo_horario")
 scheduler.add_job(verificar_followup_1h_silencio_safe, "interval", minutes=15, id="followup_1h_silencio")
 scheduler.add_job(verificar_followup_dias_silencio_safe, "interval", hours=3, id="followup_dias_silencio")
