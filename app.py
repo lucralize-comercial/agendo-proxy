@@ -1598,6 +1598,8 @@ def registrar_no_crm(conv, conversation_id, contact_name):
                 3596855,  # 1º Contato (D0)
                 3060060,  # 2° Contato
                 3060061,  # 3° Contato
+                3650939,  # Perdido - sem contato (D5) — FALTAVA aqui, mesmo bug
+                          # corrigido na outra definição dessa lista (13/08)
                 2907497,  # Contato Retornado
                 2845579,  # Reunião agendada
                 2835665,  # Follow-up
@@ -3299,6 +3301,10 @@ ORDEM_ETAPAS_FUNIL_COMERCIAL = [
     3596855,  # 1º Contato (D0)
     3060060,  # 2° Contato
     3060061,  # 3° Contato
+    3650939,  # Perdido - sem contato (D5) — FALTAVA aqui (confirmado 13/08, bug
+              # real: sem essa etapa na lista, "Contato Retornado" calculava a
+              # posição errada e acabava pousando exatamente nessa etapa em vez
+              # da própria — caso real: Milena, deal=44723372, 13/08 14:19 UTC)
     2907497,  # Contato Retornado
     2845579,  # Reunião agendada
     2835665,  # Follow-up
@@ -3347,7 +3353,12 @@ def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo
     r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/stage",
                       headers={**HEADERS, "Content-Type": "application/json"},
                       json={"dealStage": sequencia_alvo}, timeout=15)
-    print(f"[funil] Etapa -> {etapa_alvo_id} deal={deal_id} status={r.status_code}", flush=True)
+    # O log mostra os dois números: o ID pretendido (etapa_alvo_id) e a
+    # posição de verdade que foi enviada (sequencia_alvo) — antes só
+    # mostrava o ID, o que mascarou o bug real da lista incompleta
+    # (corrigido em 13/08, caso Milena/Contato Retornado).
+    print(f"[funil] Etapa -> {etapa_alvo_id} (posição enviada={sequencia_alvo}) "
+          f"deal={deal_id} status={r.status_code}", flush=True)
     return r.status_code in (200, 201)
 
 
