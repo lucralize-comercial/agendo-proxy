@@ -2002,6 +2002,25 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
             except Exception as e:
                 print(f"[disponibilidade] Erro ao checar/sugerir horário conv={conversation_id}: {e}", flush=True)
 
+        # Defesa final contra corrida entre threads (13/08): entre o momento
+        # em que uma thread foi disparada (checando "última msg é do lead")
+        # e o instante desta chamada, outra thread concorrente pode ter
+        # respondido primeiro e adicionado um turno "assistant" nesse mesmo
+        # histórico compartilhado — sem isso, a conversa termina no turno
+        # errado e a Messages API devolve resposta vazia sempre (mesmo
+        # sintoma do bug da Millela, 12/08, mas por concorrência entre
+        # threads, não por falta de segunda mensagem — caso real: Andressa,
+        # conv=1753, 13/08, aconteceu 2x na mesma conversa). Roda sempre,
+        # não só no caminho de primeira mensagem, porque qualquer thread
+        # (retomada, conv_updated, mensagem normal) pode sofrer essa corrida.
+        if conv["messages"] and conv["messages"][-1]["role"] == "assistant":
+            print(f"[luca-bg] Turno assistant sobrando no final (corrida entre threads) "
+                  f"conv={conversation_id} — removido antes de chamar o Claude", flush=True)
+            conv["messages"].pop()
+        if not conv["messages"] or conv["messages"][-1]["role"] != "user":
+            print(f"[luca-bg] Abortado — sem turno 'user' pendente após limpeza conv={conversation_id}", flush=True)
+            return
+
         reply = call_claude(conv["messages"], max_tokens=300,
                              system=conv["system"] + extra_disponibilidade, tipo="chat")
 
@@ -2684,23 +2703,29 @@ def deal_tem_marca(deal_id, marcador: str) -> bool:
 
 
 def humano_realmente_respondeu(conversation_id: int) -> bool:
-    """True se, depois da última mensagem do lead, existe uma mensagem de
-    saída escrita por um usuário humano de verdade (sender.type == 'user'),
-    não pelo Bot/automação. Usado pra distinguir 'atribuído mas nunca
-    escreveu' (ex: automação nativa atribuindo a um humano no instante da
-    criação da conversa, sem ele ter agido — caso Victor/Luiz Santos) de
-    'humano realmente assumiu e está atendendo'."""
+    """True se existe, em qualquer ponto da conversa, uma mensagem de saída
+    escrita por um usuário humano de verdade (sender.type == 'user'), não
+    pelo Bot/automação. Usado pra distinguir 'atribuído mas nunca escreveu'
+    (ex: automação nativa atribuindo a um humano no instante da criação da
+    conversa, sem ele ter agido — caso Victor/Luiz Santos) de 'humano
+    realmente assumiu e está atendendo'.
+
+    Corrigido em 13/08: a versão anterior só olhava mensagens DEPOIS da
+    última mensagem do lead — mas se o humano escreveu ANTES dessa última
+    mensagem (ex: já vinha conversando, o lead respondeu de novo, e o
+    humano ainda não teve tempo de responder essa última), a mensagem dele
+    ficava fora da checagem, e o Luca respondia por cima de um atendimento
+    humano já em andamento (caso real: Everton/Andressa, 13/08 — Everton
+    já tinha se apresentado e feito uma pergunta, mas o Luca respondeu a
+    próxima mensagem da lead mesmo assim). Uma vez que um humano de
+    verdade escreveu QUALQUER coisa na conversa, ele está no comando —
+    olha a conversa inteira, não só o trecho após a última msg do lead."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
                    and not (m.get("additional_attributes") or {}).get("automation_id")
                    and "Em breve um de nossos consultores dará andamento" not in (m.get("content") or "")]
-        ultimo_incoming_idx = None
-        for i, m in enumerate(dialogo):
-            if m.get("message_type") == 0:
-                ultimo_incoming_idx = i
-        apos = dialogo[ultimo_incoming_idx + 1:] if ultimo_incoming_idx is not None else dialogo
-        for m in apos:
+        for m in dialogo:
             if m.get("message_type") == 1:
                 sender = m.get("sender") or {}
                 # CRÍTICO: send_agendorchat_message manda as respostas do
