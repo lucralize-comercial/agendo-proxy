@@ -159,18 +159,48 @@ AGENDORCHAT_ACCOUNT_ID = os.environ.get("AGENDORCHAT_ACCOUNT_ID", "1035")
 AGENDORCHAT_BASE       = "https://chat.agendor.com.br/api/v1"
 
 
-LUCA_BOT_ASSIGNEE = os.environ.get("LUCA_BOT_ASSIGNEE", "Bot")
+LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Ronaldo Cassimiro")  # nome real da conta que o bot usa pra enviar
+LUCA_BOT_NOME_EXIBICAO = os.environ.get("LUCA_BOT_NOME_EXIBICAO", "Luca")  # available_name configurado nessa conta
+NOME_DONO_CONTA_PADRAO = os.environ.get("NOME_DONO_CONTA_PADRAO", "Luiz Santos")  # dono padrão do CRM — nunca escreve pessoalmente pro lead
 
 
 def eh_assignee_bot(assignee: dict) -> bool:
-    """Retorna True se o agente atribuído é o usuário do bot da automação —
-    conversas atribuídas a ele são território do Luca (ele responde normalmente).
-    Compara pelo nome exato para não confundir com humanos (o usuário do
-    Ronaldo tem available_name 'Luca', por exemplo). Configurável via env
-    LUCA_BOT_ASSIGNEE."""
+    """Retorna True se o agente atribuído/remetente é o usuário do bot da
+    automação (Luca) OU o dono padrão da conta do CRM — em ambos os casos,
+    conversas atribuídas a ele são território do Luca (ele responde
+    normalmente, nunca se cala por essa atribuição).
+
+    Corrigido em 13/08 (achado real, confirmado por Ronaldo): o Luca manda
+    mensagem usando a CONTA REAL do Ronaldo no Agendor — o nome de verdade
+    (campo 'name') é 'Ronaldo Cassimiro', e 'Luca' é só um nome de exibição
+    configurado nessa conta ('available_name'). A checagem anterior
+    comparava só 'name' contra a env LUCA_BOT_ASSIGNEE, cujo padrão nunca
+    foi nem 'Ronaldo Cassimiro' nem 'Luca' (valor padrão era 'Bot', nunca
+    configurado no Railway) — essa checagem NUNCA bateu corretamente, em
+    nenhum contexto, desde sempre. Isso explica os bugs reais de Luca
+    respondendo por cima de humanos (caso Everton/Andressa, 13/08) e o
+    risco inverso de Luca se calar por engano ao encontrar a PRÓPRIA
+    mensagem antiga (caso Pietro/Luiz Santos, 07/08) — os dois lados desse
+    mesmo problema de fundo. Agora compara contra os dois nomes reais, seja
+    qual campo estiver presente no objeto checado (assignee costuma trazer
+    'name'+'available_name'; sender de mensagem pode trazer só um dos
+    dois, dependendo do endpoint).
+
+    Também adicionado em 13/08: o Luiz Santos é o "dono da conta" padrão
+    do Agendor, pra quem negócios/conversas sem responsável definido caem
+    automaticamente (limitação da integração nativa do Agendor, ainda sem
+    solução definitiva do lado deles). Confirmado por Ronaldo que ele
+    NUNCA responde pessoalmente pelo WhatsApp — é só um rótulo técnico do
+    CRM. Por isso, conversa atribuída a ele deve continuar sendo território
+    do Luca, igual ao próprio bot."""
     if not assignee:
         return False
-    return (assignee.get("name") or "").strip().lower() == LUCA_BOT_ASSIGNEE.strip().lower()
+    nome = (assignee.get("name") or "").strip().lower()
+    nome_exibicao = (assignee.get("available_name") or "").strip().lower()
+    return (nome == LUCA_BOT_NOME_REAL.strip().lower()
+            or nome_exibicao == LUCA_BOT_NOME_EXIBICAO.strip().lower()
+            or nome == LUCA_BOT_NOME_EXIBICAO.strip().lower()
+            or nome == NOME_DONO_CONTA_PADRAO.strip().lower())
 
 
 def remover_travessao(texto: str) -> str:
@@ -987,6 +1017,26 @@ def send_agendorchat_message(conversation_id: int, text: str):
     )
     resp.raise_for_status()
     return resp.json()
+
+
+def resolver_conversa_agendorchat(conversation_id: int) -> bool:
+    """Marca a conversa como 'resolved' no AgendorChat, via toggle_status —
+    endpoint padrão do Chatwoot (API por trás do AgendorChat). NÃO TESTADO
+    ainda contra a API real — mesma cautela que já foi necessária com
+    outros endpoints não documentados nesse projeto (due_date, dealStage,
+    assigned_users). Usado depois do follow-up de dias (D+1/D+3/D+5): manda
+    a mensagem, reabre naturalmente, e o Luca fecha de novo — assim a
+    caixa de conversas "abertas" no AgendorChat só mostra o que realmente
+    precisa de atenção humana (decisão de Ronaldo, 13/08)."""
+    try:
+        url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}/toggle_status"
+        resp = requests.post(url, headers={"api_access_token": LUCA_SEND_TOKEN, "Content-Type": "application/json"},
+                              json={"status": "resolved"}, timeout=15)
+        print(f"[followup_dias] Resolver conversa conv={conversation_id} status={resp.status_code}", flush=True)
+        return resp.status_code in (200, 201)
+    except Exception as e:
+        print(f"[followup_dias] Erro ao resolver conversa conv={conversation_id}: {e}", flush=True)
+        return False
 
 
 def toggle_typing(inbox_identifier: str, contact_identifier: str, conversation_id: int, status: str = "on"):
@@ -3488,28 +3538,43 @@ def verificar_followup_dias_silencio():
         # (dias corridos simples a partir da criação).
         start_time = deal_fresco.get("startTime")
         if not start_time:
+            print(f"[followup_dias] Pulado — sem startTime deal={deal_id}", flush=True)
             continue
         try:
             criado_em = datetime.strptime(start_time[:10], "%Y-%m-%d")
         except Exception:
+            print(f"[followup_dias] Pulado — startTime inválido deal={deal_id} valor={start_time}", flush=True)
             continue
         dias_desde_criacao = (datetime.utcnow() - criado_em).days
         if dias_desde_criacao < dias_limite:
+            print(f"[followup_dias] Pulado — ainda não atingiu {dias_limite}d "
+                  f"(tem {dias_desde_criacao}d) deal={deal_id} etapa={etapa_atual_id}", flush=True)
             continue
 
         person = deal_fresco.get("person") or {}
         person_id = person.get("id")
         nome = (person.get("name") or "").strip().split(" ")[0] if person.get("name") else ""
         if not person_id:
+            print(f"[followup_dias] Pulado — sem person_id deal={deal_id}", flush=True)
             continue
         try:
             phone = telefone_da_pessoa(person_id)
             if not phone:
+                print(f"[followup_dias] Pulado — sem telefone person={person_id} deal={deal_id}", flush=True)
                 continue
             conv = conversa_do_telefone(phone)
-            if not conv or conv.get("status") != "open":
+            if not conv:
+                print(f"[followup_dias] Pulado — conversa não encontrada deal={deal_id}", flush=True)
                 continue
             conversation_id = conv.get("id")
+            # Não exige conv.status == "open": muitas conversas ficam
+            # "resolved" no AgendorChat por inatividade, mesmo o negócio
+            # continuando ativo — isso não significa que o lead terminou,
+            # é justamente o cenário que esse follow-up existe pra cobrir
+            # (decisão de Ronaldo, 13/08, confirmado com dados reais do
+            # funil: vários negócios de dias atrás com conversa fechada).
+            # Enviar mensagem reabre a conversa automaticamente; depois do
+            # envio, resolve de novo pra manter a caixa "abertas" limpa.
 
             if not conversa_parece_estagnada(conversation_id):
                 print(f"[followup_dias] Pulado — conversa parece concluída naturalmente "
@@ -3520,6 +3585,7 @@ def verificar_followup_dias_silencio():
             if not enviado:
                 continue
             enviados += 1
+            resolver_conversa_agendorchat(conversation_id)
 
             if proxima_etapa:
                 mover_etapa_funil_comercial(deal_id, proxima_etapa)
