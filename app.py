@@ -3011,9 +3011,19 @@ def mover_novos_leads_para_1contato():
             if not conv:
                 continue
             msgs = mensagens_da_conversa(conv["id"])
+            # Aceita QUALQUER mensagem enviada (não só as com automation_id
+            # no additional_attributes) — descoberto em 13/08, corrigido
+            # depois de confirmar com Ronaldo: é a MESMA automação nativa
+            # de sempre (41882, "Novo Lead -> Enviar WhatsApp"), não uma
+            # automação diferente. O problema é que o campo automation_id
+            # aparece no payload do webhook em tempo real, mas não vem
+            # preenchido do mesmo jeito quando a mensagem é buscada depois
+            # via histórico (endpoint diferente da mesma plataforma) — caso
+            # real: Sandra Carina, deal=44745236, saudação confirmada
+            # enviada na tela do CRM, mas a checagem antiga não reconhecia
+            # por exigir esse campo específico no histórico.
             saudacao_enviada = any(
                 m.get("message_type") == 1 and not m.get("private")
-                and (m.get("additional_attributes") or {}).get("automation_id")
                 for m in msgs
             )
             if not saudacao_enviada:
