@@ -2735,6 +2735,21 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
                 # PRÓPRIA resposta anterior e concluir que um humano já
                 # respondeu, calando-se para sempre (bug real: caso Pietro/
                 # Luiz Santos, 07/08).
+                #
+                # 13/08 (2ª rodada): mesmo depois da correção anterior
+                # (olhar a conversa inteira), o Luca continuou respondendo
+                # por cima do Everton — caso real: Everton/Andressa. Cheguei
+                # a tentar remover a exigência de sender.type=="user", mas
+                # revertido: isso arriscava um bug PIOR — muitas mensagens
+                # automáticas aparecem atribuídas ao Luiz Santos (mesmo
+                # problema não resolvido do "dono da conta"), e sem essa
+                # checagem o código passaria a interpretar QUALQUER
+                # mensagem automática do Luiz como "humano respondeu",
+                # calando o Luca em quase todo lead novo. Mantido o check
+                # original; só adicionado o log de diagnóstico abaixo, pra
+                # ver o formato real do sender na próxima ocorrência antes
+                # de mudar comportamento de novo.
+                print(f"[handoff] DEBUG sender bruto conv={conversation_id}: {sender}", flush=True)
                 if sender.get("type") == "user" and not eh_assignee_bot(sender):
                     return True
         return False
