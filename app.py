@@ -2983,6 +2983,11 @@ def mover_novos_leads_para_1contato():
         d for d in deals
         if ((d.get("dealStage") or {}).get("funnel") or {}).get("id") == FUNIL_COMERCIAL_ID
         and (d.get("dealStage") or {}).get("id") == ETAPA_NOVO_LEAD_ID
+        and not d.get("wonAt") and not d.get("lostAt")  # exclui negócios já concluídos, mesmo
+                                                          # que o campo de etapa ainda aponte pra
+                                                          # Novo Lead (caso real: Gustavo Coelho,
+                                                          # perdido há 261 dias, nunca saiu daqui —
+                                                          # confirmado em 13/08, bug real corrigido)
     ]
 
     movidos = 0
