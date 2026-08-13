@@ -2670,13 +2670,22 @@ def template_por_nome(nome: str):
 
 
 def enviar_template_conversa(conversation_id, tpl, variaveis, preview):
-    """Dispara um template aprovado numa conversa (funciona fora da janela)."""
+    """Dispara um template aprovado numa conversa (funciona fora da janela).
+
+    Corrigido em 13/08: faltava o campo 'namespace' no payload — todo
+    envio automático de template que já vimos funcionar de verdade nos
+    logs sempre trazia esse campo junto (ex: boas_vindas_primeiro_contato,
+    automation_id=41882). Sem ele, a API do AgendorChat pode aceitar a
+    requisição (retorna 200), mas o WhatsApp/Gupshup rejeita a mensagem
+    por trás — caso real: Sávio Rodrigues, D5, apareceu com alerta de erro
+    no histórico do CRM mesmo com nosso log mostrando sucesso."""
     payload = {
         "content": preview,
         "template_params": {
             "name": tpl.get("name"),
             "category": tpl.get("category"),
             "language": tpl.get("language") or "pt_BR",
+            "namespace": tpl.get("namespace"),
             "processed_params": variaveis,
             "id": tpl.get("template_id") or tpl.get("id"),
         },
@@ -3430,11 +3439,18 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     Só usa os templates Tech (12/08, decisão de Ronaldo: manter só Tech por
     ora, os da Contabilidade não foram escritos e não serão usados agora).
 
-    ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5_tech) ainda NÃO
-    existem no Meta Business Suite — precisam ser criados e aprovados
-    antes de ativar FOLLOWUP_ATIVOS, igual já foi feito pros templates de
-    lembrete de reunião. O texto já está fechado (ver histórico da
-    sessão), falta só submeter."""
+    ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5_tech) já existem e
+    estão aprovados no Meta Business Suite (confirmado 13/08).
+
+    Corrigido em 13/08 (bug real, grave): o campo 'content' que a gente
+    manda pro AgendorChat é o que realmente chega pro lead no WhatsApp —
+    não é só um resumo pra exibição interna do CRM, como eu tinha
+    assumido errado antes. A versão anterior mandava um texto curto de
+    prévia ali (ex: "Ainda por aqui, se quiser retomar é só me chamar.")
+    em vez do texto completo do template aprovado — confirmado no caso
+    real do Ricardo Ribeiro (D3), que recebeu essa frase curta genérica
+    em vez da mensagem de verdade que fechamos com o Ronaldo. Agora
+    manda o texto completo, igual ao que está aprovado no Meta."""
     nome_template = {"D1": "followup_silencio_d1_tech",
                       "D3": "followup_silencio_d3_tech",
                       "D5": "followup_silencio_d5_tech"}[tag]
@@ -3446,12 +3462,21 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
         print(f"[followup_dias] {tag} SEM TEMPLATE conv={conversation_id}", flush=True)
         return False
 
-    preview = {
-        "D1": "Passando pra saber se ainda faz sentido a gente conversar.",
-        "D3": "Ainda por aqui, se quiser retomar é só me chamar.",
-        "D5": "Última tentativa de contato antes de encerrar por aqui.",
+    nome_saudacao = nome or "tudo bem"
+    texto_completo = {
+        "D1": (f"Oi, {nome_saudacao}!\n\nVi que nossa conversa ficou parada. Seja abrindo do jeito "
+               f"certo ou ajustando o que já existe, tem como reduzir bastante o imposto da sua PJ "
+               f"com o regime tributário certo. Posso te mostrar como?"),
+        "D3": (f"Oi, {nome_saudacao}!\n\nPassando de novo por aqui porque talvez você tenha ficado "
+               f"sem tempo para continuar antes. Caso já possua CNPJ, cada mês sem o enquadramento "
+               f"certo é imposto pago a mais, sem precisar. Se deseja abrir, já podemos começar do "
+               f"jeito certo.\n\nQual o melhor momento para falarmos?"),
+        "D5": ("Já vou indo por aqui, mas antes pega essas dicas:\n\nO CNAE certo é a diferença "
+               "entre 15,5% ou 6% de imposto: https://lucralize.com.br/cnae-dev/\n\nQuanto você "
+               "pagaria de imposto? https://lucralize.com.br/calculadora-dev/\n\nEssa é minha "
+               "última mensagem. Se fizer sentido economizar, me chama quando quiser."),
     }[tag]
-    enviar_template_conversa(conversation_id, tpl, {"1": nome or "tudo bem"}, preview)
+    enviar_template_conversa(conversation_id, tpl, {"1": nome_saudacao}, texto_completo)
     send_private_note(conversation_id, f"🔁 Follow-up {tag} enviado ao lead via template.")
     espelho_crm(deal_id, f"🤖 Follow-up automático ({tag}) enviado ao lead — silêncio de {tag[1:]} dia(s).")
     print(f"[followup_dias] ✅ {tag} enviado conv={conversation_id} deal={deal_id}", flush=True)
