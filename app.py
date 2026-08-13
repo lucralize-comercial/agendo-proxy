@@ -3056,6 +3056,23 @@ def mover_novos_leads_para_1contato():
                       f"deal={deal_id}", flush=True)
                 continue
 
+            # Confere a etapa FRESCA antes de mover — o cache de negócios só
+            # atualiza de hora em hora, então o negócio pode já ter avançado
+            # de verdade (ex: "Contato Retornado", em tempo real, se o lead
+            # respondeu) desde a última atualização do cache. Sem essa
+            # checagem, este job "puxava de volta" pra 1º Contato um negócio
+            # que já tinha progredido de verdade (bug real confirmado: caso
+            # Andressa, deal=44777245, 13/08 — avançou pra Contato Retornado
+            # às 13:45, e o job rodou às 13:54 com cache de antes, movendo
+            # de volta pra 1º Contato por engano).
+            r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
+            deal_fresco = r_fresh.json().get("data") or {}
+            etapa_fresca_id = (deal_fresco.get("dealStage") or {}).get("id")
+            if etapa_fresca_id != ETAPA_NOVO_LEAD_ID:
+                print(f"[novo_lead] Pulado — negócio já avançou de etapa desde o cache "
+                      f"deal={deal_id} etapa_atual={etapa_fresca_id}", flush=True)
+                continue
+
             r = requests.put(f"{AGENDOR_BASE}/deals/{deal_id}/stage",
                               headers={**HEADERS, "Content-Type": "application/json"},
                               json={"dealStage": SEQUENCIA_1_CONTATO}, timeout=15)
