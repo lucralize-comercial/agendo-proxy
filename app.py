@@ -611,6 +611,27 @@ def fetch_page(page):
                 time.sleep(5)
     return None
 
+
+def buscar_deal_fresco(deal_id):
+    """Busca o negócio direto na API (não confia em cache), com retry —
+    a chamada simples sem retry falhava com 429 na página do Agendor,
+    devolvendo corpo vazio e um erro confuso de JSON ('Expecting value')
+    em vez de um 429 claro. Usada em vários pontos que precisam da etapa
+    fresca antes de mover (corrigido 14/08, ~22 negócios pulados por
+    rodada só por causa desse erro silencioso)."""
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
+            if r.status_code == 429:
+                raise requests.exceptions.HTTPError(f"429 na busca do deal={deal_id}")
+            r.raise_for_status()
+            return r.json().get("data") or {}
+        except Exception as e:
+            print(f"[buscar_deal_fresco] Tentativa {attempt+1}/3 falhou deal={deal_id}: {e}", flush=True)
+            if attempt < 2:
+                time.sleep(3)
+    return {}
+
 def fetch_deal_history(deal_id):
     for attempt in range(2):
         try:
@@ -1604,10 +1625,10 @@ def registrar_no_crm(conv, conversation_id, contact_name):
                 2845579,  # Reunião agendada
                 2835665,  # Follow-up
                 2835666,  # Fechamento
+                3650859,  # Perdido (genérica) — adicionada 13/08
             ]
             try:
-                r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-                deal_fresco = r_fresh.json().get("data") or {}
+                deal_fresco = buscar_deal_fresco(deal_id)
             except Exception as e:
                 print(f"[crm] Erro ao buscar negócio fresco pra checar etapa: {e}", flush=True)
                 deal_fresco = {}
@@ -3104,12 +3125,15 @@ def mover_novos_leads_para_1contato():
             # mesmo que a automação nativa tivesse falhado por qualquer
             # motivo — telefone inválido, automação desativada, etc.).
             if not person_id:
+                print(f"[novo_lead] Pulado — sem person_id deal={deal_id}", flush=True)
                 continue
             telefone = telefone_da_pessoa(person_id)
             if not telefone:
+                print(f"[novo_lead] Pulado — sem telefone person={person_id} deal={deal_id}", flush=True)
                 continue
             conv = conversa_do_telefone(telefone)
             if not conv:
+                print(f"[novo_lead] Pulado — conversa não encontrada telefone={telefone} deal={deal_id}", flush=True)
                 continue
             msgs = mensagens_da_conversa(conv["id"])
             # Aceita QUALQUER mensagem enviada (não só as com automation_id
@@ -3318,6 +3342,8 @@ ORDEM_ETAPAS_FUNIL_COMERCIAL = [
     2845579,  # Reunião agendada
     2835665,  # Follow-up
     2835666,  # Fechamento
+    3650859,  # Perdido (genérica) — adicionada 13/08, destino do D5 quando já
+              # teve contato humano em algum momento, mas não fechou
 ]
 
 # (etapa atual, dias corridos desde a criação do negócio pra disparar, rótulo, próxima etapa ou None)
@@ -3338,8 +3364,7 @@ def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo
     semanticamente é o lead voltando a se engajar, mesmo que a posição
     dessa etapa na lista seja anterior à de 2°/3° Contato."""
     try:
-        r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-        deal_fresco = r_fresh.json().get("data") or {}
+        deal_fresco = buscar_deal_fresco(deal_id)
     except Exception as e:
         print(f"[funil] Erro ao buscar negócio fresco deal={deal_id}: {e}", flush=True)
         return False
@@ -3414,6 +3439,8 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
 
 
 ETAPA_PERDIDO_SEM_CONTATO = 3650939  # confirmado via JSON real da API, 12/08
+ETAPA_PERDIDO_GENERICO = 3650859  # etapa "Perdido" genérica (posição 10, fim do funil) —
+                                    # usada quando já teve contato humano, mas não fechou (13/08)
 
 
 def marcar_perdido_sem_contato(deal_id: int) -> bool:
@@ -3506,8 +3533,7 @@ def verificar_followup_dias_silencio():
         try:
             # Etapa fresca, não a do cache (pode ter até 1h de atraso) —
             # evita agir duas vezes em cima de uma etapa que já mudou.
-            r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-            deal_fresco = r_fresh.json().get("data") or {}
+            deal_fresco = buscar_deal_fresco(deal_id)
         except Exception as e:
             print(f"[followup_dias] Erro ao buscar negócio fresco deal={deal_id}: {e}", flush=True)
             continue
@@ -3633,8 +3659,17 @@ def verificar_followup_dias_silencio():
                             "🔁 Follow-up D5 esgotado, sem intervenção humana em nenhum momento "
                             "— negócio marcado PERDIDO - SEM CONTATO.")
                 else:
-                    print(f"[followup_dias] D5 enviado mas humano já interveio em algum "
-                          f"momento — não marca perdido, deal={deal_id}", flush=True)
+                    # Já teve contato humano em algum momento, mas não fechou —
+                    # move pra "Perdido" genérica (não "sem contato", porque
+                    # teve contato sim). Evita também que o negócio fique
+                    # parado em 3º Contato pra sempre, batendo a mesma regra
+                    # D5 de novo na próxima rodada (decisão de Ronaldo, 13/08).
+                    if mover_etapa_funil_comercial(deal_id, ETAPA_PERDIDO_GENERICO):
+                        send_private_note(conversation_id,
+                            "🔁 Follow-up D5 esgotado. Já teve contato humano em algum momento, "
+                            "mas não fechou — negócio marcado PERDIDO (genérico).")
+                    print(f"[followup_dias] D5 enviado, humano já interveio — movido pra "
+                          f"Perdido genérico, deal={deal_id}", flush=True)
 
         except Exception as e:
             print(f"[followup_dias] Erro deal={deal_id}: {e}", flush=True)
