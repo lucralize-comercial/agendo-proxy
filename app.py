@@ -319,7 +319,6 @@ conversation_histories = {}
 AZURE_CLIENT_ID     = os.environ.get("AZURE_CLIENT_ID",     "c0868f3b-764c-4c5b-a9fc-4af4b6eb0baf")
 AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "PBL8Q~pfG-XmBkvvmv5K~NgY-pLxpWlbayUE5aOb")
 AZURE_TENANT_ID     = os.environ.get("AZURE_TENANT_ID",     "5173aa83-66e1-49f3-9128-f2251b43294d")
-CALENDAR_USER       = os.environ.get("CALENDAR_USER",       "ronaldojunior@lucralize.com.br")
 
 # Organizador e convidados fixos da reunião com o especialista — confirmado
 # com Ronaldo em 11/08: o Everton normalmente conduz, Ronaldo e Luiz ficam
@@ -468,6 +467,19 @@ def checar_e_sugerir_horario(dt_pedido: datetime, duracao_min: int = 30):
     return False, alternativas
 
 
+def extrair_emails(texto: str) -> list:
+    """Extrai TODOS os e-mails válidos de um texto livre — o lead às vezes
+    manda mais de um junto (ex: dois sócios), separados por 'e', vírgula
+    ou ponto-e-vírgula ('joao@x.com e maria@y.com'). Antes disso, o
+    código tratava o texto inteiro como um único e-mail, o que quebrava
+    a atualização no CRM (Agendor rejeitava com 400) e, mais grave, podia
+    impedir a criação do link real da reunião no Teams (caso real:
+    Alessandra, 2 sócios, 17/08 — confirmado erro 400 no cadastro)."""
+    if not texto:
+        return []
+    return re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", texto)
+
+
 def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
                           linha_negocio: str = "contabilidade", duracao_min: int = 30) -> dict:
     """Cria a reunião de verdade no Teams via Microsoft Graph, com:
@@ -506,8 +518,11 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
     token = obter_token_azure()
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
-    attendees = [{"emailAddress": {"address": lead_email, "name": lead_name},
-                  "type": "required"}]
+    emails_lead = extrair_emails(lead_email) or [lead_email]  # fallback: se não
+    # achar padrão de e-mail nenhum, tenta a string bruta mesmo assim (não
+    # bloqueia a criação da reunião por causa disso)
+    attendees = [{"emailAddress": {"address": email, "name": lead_name},
+                  "type": "required"} for email in emails_lead]
     for email_copia in TEAMS_COPIA:
         attendees.append({"emailAddress": {"address": email_copia}, "type": "optional"})
 
@@ -1130,9 +1145,21 @@ def buscar_pessoa_e_negocio(phone):
     SEGUNDA pessoa, a função nunca achava, tentava criar um negócio novo,
     e isso já causou falha real no fluxo (reunião/link não gerados)."""
     phone_clean = phone.replace("+", "").replace(" ", "").strip()
-    r = requests.get(f"{AGENDOR_BASE}/people", headers=HEADERS,
-                     params={"phone": phone_clean}, timeout=15)
-    pessoas = r.json().get("data", [])
+    pessoas = []
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{AGENDOR_BASE}/people", headers=HEADERS,
+                             params={"phone": phone_clean}, timeout=15)
+            if r.status_code == 429:
+                raise requests.exceptions.HTTPError(f"429 buscando pessoa phone={phone_clean}")
+            r.raise_for_status()
+            pessoas = r.json().get("data", [])
+            break
+        except Exception as e:
+            print(f"[buscar_pessoa_e_negocio] Tentativa {attempt+1}/3 falhou (pessoas) "
+                  f"phone={phone_clean}: {e}", flush=True)
+            if attempt < 2:
+                time.sleep(3)
     if not pessoas:
         return None, None
 
@@ -1140,8 +1167,21 @@ def buscar_pessoa_e_negocio(phone):
     # QUALQUER pessoa (bug confirmado na API) — usa o endpoint aninhado, que
     # filtra corretamente.
     for person in pessoas:
-        r2 = requests.get(f"{AGENDOR_BASE}/people/{person.get('id')}/deals", headers=HEADERS, timeout=15)
-        deals = r2.json().get("data", [])
+        deals = []
+        for attempt in range(3):
+            try:
+                r2 = requests.get(f"{AGENDOR_BASE}/people/{person.get('id')}/deals",
+                                   headers=HEADERS, timeout=15)
+                if r2.status_code == 429:
+                    raise requests.exceptions.HTTPError(f"429 buscando deals person={person.get('id')}")
+                r2.raise_for_status()
+                deals = r2.json().get("data", [])
+                break
+            except Exception as e:
+                print(f"[buscar_pessoa_e_negocio] Tentativa {attempt+1}/3 falhou (deals) "
+                      f"person={person.get('id')}: {e}", flush=True)
+                if attempt < 2:
+                    time.sleep(3)
         deals_comercial = [
             d for d in deals
             if ((d.get("dealStage") or {}).get("funnel") or {}).get("id") == FUNIL_COMERCIAL_ID
@@ -1332,7 +1372,9 @@ def atualizar_pessoa_se_incompleta(person: dict, nome_lead: str, email_lead: str
         if (not nome_atual) or (" " not in nome_atual and " " in nome_lead_limpo):
             updates["name"] = nome_lead_limpo
     if email_lead and email_lead.strip() and not email_atual:
-        updates["contact"] = {"email": email_lead.strip()}
+        emails_encontrados = extrair_emails(email_lead)
+        primeiro_email = emails_encontrados[0] if emails_encontrados else email_lead.strip()
+        updates["contact"] = {"email": primeiro_email}
 
     if not updates:
         return
@@ -2157,7 +2199,22 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                     and d.get("segmento") and d.get("segmento") != "Não identificado"
                     and d.get("necessidade") and d.get("necessidade") != "Não informada"
                     and d.get("email") and d.get("email") != "Não informado"
-                    and d.get("preferencia")  # só fecha o ciclo com a reunião já combinada
+                    # Corrigido em 17/08: exigir só "preferencia" não-vazia
+                    # deixava respostas vagas ("Qualquer dia") fecharem o
+                    # ciclo cedo demais — como o fechamento só acontece UMA
+                    # vez (note_sent), quando o lead dizia o dia/horário
+                    # exato minutos depois, o sistema já tinha "carimbado"
+                    # a conversa como concluída e NUNCA criava a reunião real
+                    # no Teams (caso real: Alessandra, 17/08 — ficou só com
+                    # uma tarefa "HORÁRIO A CONFIRMAR", sem link nenhum).
+                    # Usa o filtro barato (parece_ter_horario, regex, sem
+                    # Claude) primeiro — só chama parse_preferencia_datetime
+                    # (que usa Claude) quando já parece ter chance real de
+                    # ser concreto, evitando gastar uma chamada em toda
+                    # mensagem enquanto o lead ainda está respondendo vago.
+                    and d.get("preferencia")
+                    and parece_ter_horario(d.get("preferencia"))
+                    and parse_preferencia_datetime(d.get("preferencia")) is not None
                 )
 
                 # Detecta encerramento por acompanhamento
@@ -3379,6 +3436,14 @@ def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo
         return False
     idx_atual = ORDEM_ETAPAS_FUNIL_COMERCIAL.index(etapa_atual_id)
     idx_alvo = ORDEM_ETAPAS_FUNIL_COMERCIAL.index(etapa_alvo_id)
+    if idx_atual == idx_alvo:
+        # Já está exatamente na etapa alvo — não gasta chamada de API à toa.
+        # Achado real em 17/08: com permitir_recuo=True (caso "Contato
+        # Retornado"), a checagem abaixo nunca barrava isso, e mensagens
+        # rápidas em sequência do mesmo lead geravam PUT duplicado pra
+        # mesma etapa (caso real: deal=44846617, duas chamadas idênticas
+        # com 1s de diferença).
+        return True
     if not permitir_recuo and idx_atual >= idx_alvo:
         print(f"[funil] Etapa não movida — atual (idx={idx_atual}) já é igual/posterior ao "
               f"alvo (idx={idx_alvo}) deal={deal_id}", flush=True)
