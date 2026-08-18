@@ -255,13 +255,19 @@ USAGE_STATS = {
 }
 
 
-def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROMPT, tentativas: int = 3, tipo: str = "chat") -> str:
+def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROMPT, tentativas: int = 3,
+                 tipo: str = "chat", model: str = "claude-sonnet-5") -> str:
     """Chama a API Anthropic e retorna o texto da resposta.
     Tenta novamente se vier resposta vazia (falha transitória rara da API) —
     sem isso, uma única resposta vazia deixava o Luca em silêncio pro lead.
     Usa prompt caching: o texto fixo do system fica marcado como cacheável,
     e a data/hora atual (que muda a cada minuto) vai à parte, sem cache —
-    caso contrário o cache nunca "bateria" de uma chamada pra outra."""
+    caso contrário o cache nunca "bateria" de uma chamada pra outra.
+
+    Atualizado em 18/08: modelo base trocado de claude-sonnet-4-5 (antigo)
+    pra claude-sonnet-5 (atual). O parâmetro 'model' permite usar um
+    modelo mais barato (ex: claude-haiku-4-5-20251001) pra tarefas simples
+    de classificação, sem precisar duplicar essa função."""
     system_blocks = [
         {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}},
         {"type": "text", "text": contexto_data_atual()},
@@ -277,7 +283,7 @@ def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROM
                     "Content-Type":      "application/json",
                 },
                 json={
-                    "model":      "claude-sonnet-4-5",
+                    "model":      model,
                     "max_tokens": max_tokens,
                     "system":     system_blocks,
                     "messages":   messages,
@@ -1248,7 +1254,8 @@ def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
             "Responda APENAS o ISO ou INDEFINIDA, nada mais.\n\n"
             f"Preferência: {preferencia}"
         )
-        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30, tipo=tipo).strip()
+        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30, tipo=tipo,
+                           model="claude-haiku-4-5-20251001").strip()
         if "INDEFINIDA" in resp.upper():
             return None
         datetime.strptime(resp[:16], "%Y-%m-%dT%H:%M")
@@ -1667,19 +1674,11 @@ def registrar_no_crm(conv, conversation_id, contact_name):
             # ── 5. Move etapa para 'Reunião agendada' (Funil Comercial, só avança) ─
             FUNIL_COMERCIAL_ID = 696449
             ETAPA_REUNIAO_AGENDADA_ID = 2845579
-            ORDEM_ETAPAS_FUNIL_COMERCIAL = [
-                2835663,  # Novo Lead
-                3596855,  # 1º Contato (D0)
-                3060060,  # 2° Contato
-                3060061,  # 3° Contato
-                3650939,  # Perdido - sem contato (D5) — FALTAVA aqui, mesmo bug
-                          # corrigido na outra definição dessa lista (13/08)
-                2907497,  # Contato Retornado
-                2845579,  # Reunião agendada
-                2835665,  # Follow-up
-                2835666,  # Fechamento
-                3650859,  # Perdido (genérica) — adicionada 13/08
-            ]
+            # Unificado em 18/08: usa a lista única definida no nível do
+            # arquivo (ORDEM_ETAPAS_FUNIL_COMERCIAL) em vez de uma cópia
+            # local — eram 2 cópias idênticas, risco de ficarem
+            # dessincronizadas de novo no futuro (foi exatamente isso que
+            # causou o bug real da Milena, 13/08).
             try:
                 deal_fresco = buscar_deal_fresco(deal_id)
             except Exception as e:
@@ -1937,7 +1936,9 @@ Campos de INTELIGÊNCIA COMERCIAL (exigem mais cuidado — só preencha com evid
 "proxima_acao_consultor" = uma sugestão curta e concreta do que o consultor deveria fazer na reunião (ex: "Simular tributação com faturamento de 8k/mês", "Explicar processo de migração"), baseada só no que já foi discutido — não invente uma ação genérica se não houver base clara na conversa.
 "resumo_conversa" = 1 a 2 frases resumindo o essencial da conversa até agora, em tom neutro e factual.
 
-Para status use: "Em qualificação" | "Interesse confirmado" | "Aguardando e-mail" | "Preferência informada: [dia] às [horário]" | "Agendamento confirmado"
+Para status use: "Em qualificação" | "Interesse confirmado" | "Aguardando e-mail" | "Preferência informada: [dia] às [horário]" | "Agendamento confirmado" | "Perdido: [motivo breve]"
+
+Use "Perdido: [motivo]" SÓ quando o lead disser explicitamente que não vai seguir (ex: "já fechei com outra empresa", "não tenho mais interesse", "vou resolver sozinho") — nunca infira isso por silêncio ou tom.
 """
     try:
         reply = call_claude(
@@ -2262,6 +2263,26 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                     print(f"[note] Nota enviada conv={conversation_id} | completo={dados_completos} | encerrado={conversa_encerrada}", flush=True)
                     # Fecha o ciclo no CRM: nota, transcrição, reunião [Luca] e campo
                     registrar_no_crm(conv, conversation_id, contact_name)
+
+                    # Corrigido em 18/08 (bug real, confirmado em produção): o
+                    # campo "status" às vezes vem "Perdido para concorrente"
+                    # (a IA reconhece a perda pelo texto, ex: "já segui com
+                    # outra empresa"), mas isso ficava só escrito no
+                    # resumo/nota — nada movia a etapa de verdade no funil
+                    # (caso real: Thiago Mateus, deal=44854914, 18/08, ficou
+                    # preso em "Novo Lead" mesmo marcado como perdido na
+                    # nota). Agora, se o status indicar perda, move pra
+                    # "Perdido" genérico de verdade.
+                    status_extraido = (d.get("status") or "").strip().lower()
+                    if status_extraido.startswith("perdido"):
+                        try:
+                            _, deal_perdido = buscar_pessoa_e_negocio(d["telefone"])
+                            if deal_perdido and deal_perdido.get("id"):
+                                if mover_etapa_funil_comercial(deal_perdido["id"], ETAPA_PERDIDO_GENERICO):
+                                    print(f"[note] Status indica perda — negócio movido pra "
+                                          f"Perdido genérico deal={deal_perdido['id']}", flush=True)
+                        except Exception as e:
+                            print(f"[note] Erro ao mover negócio perdido conv={conversation_id}: {e}", flush=True)
         except Exception as e:
             print(f"[note] Erro ao processar nota: {e}", flush=True)
 
@@ -3378,7 +3399,8 @@ completa que não pede mais nada do lead)?
 Responda apenas com uma palavra: PARADA ou FECHADA."""
         resposta = call_claude(
             [{"role": "user", "content": prompt}], max_tokens=10,
-            system="Você classifica o estado de conversas comerciais. Responda só com uma palavra: PARADA ou FECHADA."
+            system="Você classifica o estado de conversas comerciais. Responda só com uma palavra: PARADA ou FECHADA.",
+            model="claude-haiku-4-5-20251001"
         )
         return "PARADA" in resposta.upper()
     except Exception as e:
@@ -3468,6 +3490,7 @@ def verificar_followup_1h_silencio_safe():
 # agir em cima de cache com até 1h de atraso). Nenhum estado em RAM.
 
 FUNIL_COMERCIAL_ID = 696449
+ETAPA_NOVO_LEAD      = 2835663  # Novo Lead
 ETAPA_1_CONTATO      = 3596855  # 1º Contato (D0)
 ETAPA_2_CONTATO       = 3060060  # 2° Contato
 ETAPA_3_CONTATO       = 3060061  # 3° Contato
@@ -3555,13 +3578,28 @@ def mover_para_contato_retornado_se_aplicavel(phone: str):
     (entendimento anterior estava restrito demais, só cobria 2º/3º
     Contato): qualquer resposta do lead enquanto o negócio está em 1º, 2º
     ou 3º Contato já confirma engajamento real e move pra 'Contato
-    Retornado'. Roda em thread separada, não atrasa a resposta do Luca."""
+    Retornado'. Roda em thread separada, não atrasa a resposta do Luca.
+
+    Corrigido em 18/08: faltava "Novo Lead" nessa lista — se a transição
+    pra "1º Contato" ainda não tinha rodado (job de 15 em 15 min) quando
+    o lead já estava respondendo ativamente, o negócio ficava preso em
+    "Novo Lead" a conversa inteira, mesmo com engajamento real óbvio
+    (caso real: Thiago Mateus, deal=44854914, 17-18/08 — conversa longa
+    de qualificação inteira aconteceu sem sair de "Novo Lead").
+
+    Também em 18/08: inclui "Perdido - sem contato (D5)" — se mandamos a
+    última mensagem da cascata e o lead responde depois disso, é um
+    retorno de verdade, mesmo já tendo sido marcado como perdido por
+    silêncio. NÃO inclui "Perdido" genérico (decisão de Ronaldo,
+    18/08) — esse caso já teve contato humano e não fechou por outro
+    motivo, uma resposta tardia não desfaz isso automaticamente."""
     try:
         _, deal = buscar_pessoa_e_negocio(phone)
         if not deal:
             return
         etapa_atual_id = (deal.get("dealStage") or {}).get("id")
-        if etapa_atual_id in (ETAPA_1_CONTATO, ETAPA_2_CONTATO, ETAPA_3_CONTATO):
+        if etapa_atual_id in (ETAPA_NOVO_LEAD, ETAPA_1_CONTATO, ETAPA_2_CONTATO,
+                               ETAPA_3_CONTATO, ETAPA_PERDIDO_SEM_CONTATO):
             mover_etapa_funil_comercial(deal["id"], ETAPA_CONTATO_RETORNADO, permitir_recuo=True)
     except Exception as e:
         print(f"[contato_retornado] Erro phone={phone}: {e}", flush=True)
