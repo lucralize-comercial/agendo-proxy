@@ -1287,8 +1287,19 @@ def criar_negocio_funil_comercial(person_id, nome: str):
         if rd.status_code in (200, 201):
             return rd.json().get("data") or rd.json()
         if rd.status_code == 400 and "one deal with this title" in rd.text:
-            r2 = requests.get(f"{AGENDOR_BASE}/people/{person_id}/deals", headers=HEADERS, timeout=15)
-            deals = r2.json().get("data", [])
+            deals = []
+            for attempt in range(3):
+                try:
+                    r2 = requests.get(f"{AGENDOR_BASE}/people/{person_id}/deals", headers=HEADERS, timeout=15)
+                    if r2.status_code == 429:
+                        raise requests.exceptions.HTTPError("429 buscando deals (colisão de título)")
+                    r2.raise_for_status()
+                    deals = r2.json().get("data", [])
+                    break
+                except Exception as e:
+                    print(f"[crm] Tentativa {attempt+1}/3 falhou (deals colisão): {e}", flush=True)
+                    if attempt < 2:
+                        time.sleep(3)
             existente = next((d for d in deals if d.get("title") == titulo), None)
             if existente and not existente.get("wonAt") and not existente.get("lostAt"):
                 print(f"[crm] Negócio existente com esse título está ATIVO — reaproveitando "
@@ -1954,9 +1965,20 @@ def preencher_origem_whatsapp_pagina(phone):
         # Normaliza telefone — remove +, espaços
         phone_clean = phone.replace("+", "").replace(" ", "").strip()
         # Busca pessoa pelo telefone
-        r = requests.get(f"{AGENDOR_BASE}/people", headers=HEADERS,
-                         params={"phone": phone_clean}, timeout=15)
-        pessoas = r.json().get("data", [])
+        pessoas = []
+        for attempt in range(3):
+            try:
+                r = requests.get(f"{AGENDOR_BASE}/people", headers=HEADERS,
+                                 params={"phone": phone_clean}, timeout=15)
+                if r.status_code == 429:
+                    raise requests.exceptions.HTTPError(f"429 buscando pessoa phone={phone_clean}")
+                r.raise_for_status()
+                pessoas = r.json().get("data", [])
+                break
+            except Exception as e:
+                print(f"[origem] Tentativa {attempt+1}/3 falhou (pessoa): {e}", flush=True)
+                if attempt < 2:
+                    time.sleep(3)
         if not pessoas:
             print(f"[origem] Pessoa não encontrada para telefone {phone_clean}", flush=True)
             return
@@ -1964,8 +1986,19 @@ def preencher_origem_whatsapp_pagina(phone):
         # Busca negócios da pessoa. IMPORTANTE: GET /deals?personId=X ignora o
         # filtro e devolve negócios de QUALQUER pessoa (bug confirmado na API)
         # — usa o endpoint aninhado, que filtra corretamente.
-        r2 = requests.get(f"{AGENDOR_BASE}/people/{person_id}/deals", headers=HEADERS, timeout=15)
-        deals = r2.json().get("data", [])
+        deals = []
+        for attempt in range(3):
+            try:
+                r2 = requests.get(f"{AGENDOR_BASE}/people/{person_id}/deals", headers=HEADERS, timeout=15)
+                if r2.status_code == 429:
+                    raise requests.exceptions.HTTPError(f"429 buscando deals person={person_id}")
+                r2.raise_for_status()
+                deals = r2.json().get("data", [])
+                break
+            except Exception as e:
+                print(f"[origem] Tentativa {attempt+1}/3 falhou (deals): {e}", flush=True)
+                if attempt < 2:
+                    time.sleep(3)
         if not deals:
             print(f"[origem] Nenhum negócio encontrado para person_id={person_id}", flush=True)
             return
@@ -2985,8 +3018,8 @@ def processar_lembrete(task, tipo, due):
     if not person_id and deal_id:
         # A listagem de tasks não traz a pessoa: busca via negócio
         try:
-            r = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-            dp = ((r.json().get("data") or {}).get("person")) or {}
+            deal_fresco = buscar_deal_fresco(deal_id)
+            dp = deal_fresco.get("person") or {}
             if dp.get("id"):
                 pessoa, person_id = dp, dp.get("id")
                 print(f"[lembrete] pessoa obtida via negócio: person={person_id} task={task_id}", flush=True)
@@ -3111,8 +3144,8 @@ def varredura_lembretes():
         status = status_por_deal.get(deal_id)
         if status is None:
             try:
-                r = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-                status = ((r.json().get("data") or {}).get("dealStatus") or {}).get("id")
+                deal_fresco = buscar_deal_fresco(deal_id)
+                status = (deal_fresco.get("dealStatus") or {}).get("id")
                 status_por_deal[deal_id] = status
             except Exception as e:
                 print(f"[lembrete] Status do negócio {deal_id} indisponível ({e}) — permitindo", flush=True)
@@ -3260,8 +3293,7 @@ def mover_novos_leads_para_1contato():
             # Andressa, deal=44777245, 13/08 — avançou pra Contato Retornado
             # às 13:45, e o job rodou às 13:54 com cache de antes, movendo
             # de volta pra 1º Contato por engano).
-            r_fresh = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
-            deal_fresco = r_fresh.json().get("data") or {}
+            deal_fresco = buscar_deal_fresco(deal_id)
             etapa_fresca_id = (deal_fresco.get("dealStage") or {}).get("id")
             if etapa_fresca_id != ETAPA_NOVO_LEAD_ID:
                 print(f"[novo_lead] Pulado — negócio já avançou de etapa desde o cache "
