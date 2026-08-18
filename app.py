@@ -2850,22 +2850,38 @@ def enviar_template_conversa(conversation_id, tpl, variaveis, preview):
 _phone_cache = {}
 
 def telefone_da_pessoa(person_id):
-    """Busca o telefone/WhatsApp de uma pessoa no Agendor (com cache)."""
+    """Busca o telefone/WhatsApp de uma pessoa no Agendor (com cache).
+
+    Corrigido em 18/08 (bug real, confirmado em produção): um 429
+    transitório (limite de taxa do Agendor) caía no except e MESMO ASSIM
+    guardava "" no cache PRA SEMPRE — um erro passageiro virava uma marca
+    permanente de "sem telefone", e esse lead nunca mais era processado
+    certinho pelo follow-up até o container reiniciar (caso real:
+    person=70717332, deal=44802711, 18/08). Agora só guarda "" quando a
+    API respondeu de verdade (sem 429) e realmente não tinha telefone —
+    falha de rede/limite de taxa não polui o cache."""
     if person_id in _phone_cache:
         return _phone_cache[person_id]
-    try:
-        r = requests.get(f"{AGENDOR_BASE}/people/{person_id}", headers=HEADERS, timeout=15)
-        data = r.json().get("data", {}) or {}
-        contato = data.get("contact") or {}
-        for campo in ("whatsapp", "mobile", "phone", "workPhone"):
-            valor = (contato.get(campo) or "").strip()
-            if valor:
-                _phone_cache[person_id] = valor
-                return valor
-    except Exception as e:
-        print(f"[lembrete] Erro ao buscar telefone person={person_id}: {e}", flush=True)
-    _phone_cache[person_id] = ""
-    return ""
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{AGENDOR_BASE}/people/{person_id}", headers=HEADERS, timeout=15)
+            if r.status_code == 429:
+                raise requests.exceptions.HTTPError(f"429 buscando telefone person={person_id}")
+            r.raise_for_status()
+            data = r.json().get("data", {}) or {}
+            contato = data.get("contact") or {}
+            for campo in ("whatsapp", "mobile", "phone", "workPhone"):
+                valor = (contato.get(campo) or "").strip()
+                if valor:
+                    _phone_cache[person_id] = valor
+                    return valor
+            _phone_cache[person_id] = ""  # resposta válida, mas sem nenhum telefone preenchido
+            return ""
+        except Exception as e:
+            print(f"[lembrete] Tentativa {attempt+1}/3 falhou (telefone) person={person_id}: {e}", flush=True)
+            if attempt < 2:
+                time.sleep(3)
+    return ""  # esgotou tentativas — NÃO guarda no cache, tenta de novo na próxima rodada
 
 
 def conversa_do_telefone(phone):
