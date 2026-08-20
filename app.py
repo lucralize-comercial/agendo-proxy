@@ -305,8 +305,18 @@ def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROM
             bucket["cache_write"] += uso.get("cache_creation_input_tokens", 0)
 
             content = data.get("content") or []
-            if content and content[0].get("text"):
-                return content[0]["text"].strip()
+            # Corrigido em 19/08 (bug real, urgente, confirmado em produção):
+            # o claude-sonnet-5 pode devolver um bloco de "thinking" ANTES
+            # do texto de verdade (raciocínio estendido). O código antigo
+            # só olhava content[0], assumindo que já era o texto — quando
+            # vinha "thinking" primeiro, isso contava como "sem conteúdo"
+            # e o Luca ficava 3 tentativas em silêncio, sem responder o
+            # lead (casos reais: Leandro e Anderson, 18-19/08, nenhuma
+            # resposta chegou). Agora procura o primeiro bloco do tipo
+            # "text" em qualquer posição, ignorando "thinking".
+            texto_bloco = next((b.get("text") for b in content if b.get("type") == "text" and b.get("text")), None)
+            if texto_bloco:
+                return texto_bloco.strip()
             print(f"[claude] Resposta sem conteúdo (tentativa {tentativa}/{tentativas}): "
                   f"{json.dumps(data)[:300]}", flush=True)
             ultimo_erro = ValueError("Resposta da Anthropic sem conteúdo de texto")
@@ -1727,19 +1737,26 @@ def send_private_note(conversation_id: int, text: str):
 
 
 def get_conversation_details(conversation_id: int) -> dict:
-    """Busca status e assignee atuais de uma conversa no AgendorChat."""
+    """Busca status e assignee atuais de uma conversa no AgendorChat.
+
+    Corrigido 20/08: sem proteção contra falha temporária (ex: 502 do
+    lado do AgendorChat), confirmado em produção causando erro em
+    cascata em lembretes e follow-ups."""
     url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}"
-    try:
-        resp = requests.get(
-            url,
-            headers={"api_access_token": AGENDORCHAT_TOKEN},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        print(f"[conv_details] Erro ao buscar conv={conversation_id}: {e}", flush=True)
-        return {}
+    for attempt in range(3):
+        try:
+            resp = requests.get(
+                url,
+                headers={"api_access_token": AGENDORCHAT_TOKEN},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            print(f"[conv_details] Tentativa {attempt+1}/3 falhou conv={conversation_id}: {e}", flush=True)
+            if attempt < 2:
+                time.sleep(3)
+    return {}
 
 
 def get_last_message_info(conversation_id: int) -> dict:
@@ -1943,7 +1960,12 @@ Use "Perdido: [motivo]" SÓ quando o lead disser explicitamente que não vai seg
     try:
         reply = call_claude(
             [{"role": "user", "content": prompt}],
-            max_tokens=600,
+            max_tokens=2000,  # Corrigido 20/08: com Sonnet 5 usando raciocínio
+            # estendido, 600 tokens às vezes eram consumidos todos só pelo
+            # "thinking", sem sobrar nada pro JSON de verdade — resposta
+            # vinha vazia (bug real, confirmado em produção, várias
+            # conversas afetadas). Sem custo extra: só paga pelo que o
+            # modelo realmente gera, max_tokens é só um teto de segurança.
             system="Você extrai dados estruturados de conversas. Retorne apenas JSON válido. Nunca invente ou deduza valores sem evidência clara e literal no texto — prefira deixar em branco.",
             tipo="extracao"
         )
@@ -2170,7 +2192,13 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
             print(f"[luca-bg] Abortado — sem turno 'user' pendente após limpeza conv={conversation_id}", flush=True)
             return
 
-        reply = call_claude(conv["messages"], max_tokens=300,
+        # Corrigido 20/08: 300 tokens não deixava espaço pro raciocínio
+        # estendido do Sonnet 5 + a resposta de verdade — o modelo às vezes
+        # gastava tudo só "pensando" e nunca escrevia o texto (bug real,
+        # confirmado em produção: Leandro, Anderson, Giovanna e outros
+        # ficaram sem resposta nenhuma do Luca por causa disso). Sem custo
+        # extra: só paga pelo que realmente gera, max_tokens é só um teto.
+        reply = call_claude(conv["messages"], max_tokens=2000,
                              system=conv["system"] + extra_disponibilidade, tipo="chat")
 
         # Desativa "digitando..."
@@ -2906,31 +2934,47 @@ def telefone_da_pessoa(person_id):
 
 
 def conversa_do_telefone(phone):
-    """Localiza a conversa mais recente do lead na inbox da API oficial."""
-    try:
-        digits = "".join(c for c in phone if c.isdigit())
-        for q in (phone, "+" + digits, digits):
-            r = requests.get(
-                f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/contacts/search",
-                headers={"api_access_token": AGENDORCHAT_TOKEN},
-                params={"q": q}, timeout=15)
-            contatos = r.json().get("payload", [])
-            if contatos:
-                break
-        if not contatos:
-            return None
-        contact_id = contatos[0].get("id")
-        r2 = requests.get(
-            f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/contacts/{contact_id}/conversations",
-            headers={"api_access_token": AGENDORCHAT_TOKEN}, timeout=15)
-        convs = r2.json().get("payload", [])
-        convs = [c for c in convs if str(c.get("inbox_id")) == str(AGENDORCHAT_INBOX_ID)]
-        if not convs:
-            return None
-        return sorted(convs, key=lambda c: c.get("id") or 0)[-1]
-    except Exception as e:
-        print(f"[lembrete] Erro ao localizar conversa de {phone}: {e}", flush=True)
-        return None
+    """Localiza a conversa mais recente do lead na inbox da API oficial.
+
+    Corrigido 20/08: sem proteção contra falha temporária (429/rede), um
+    erro passageiro fazia o código concluir 'conversa não encontrada' —
+    confirmado em produção, vários follow-ups e lembretes pulados à toa
+    por causa disso."""
+    for attempt in range(3):
+        try:
+            digits = "".join(c for c in phone if c.isdigit())
+            contatos = []
+            for q in (phone, "+" + digits, digits):
+                r = requests.get(
+                    f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/contacts/search",
+                    headers={"api_access_token": AGENDORCHAT_TOKEN},
+                    params={"q": q}, timeout=15)
+                if r.status_code == 429:
+                    raise requests.exceptions.HTTPError(f"429 buscando contato q={q}")
+                r.raise_for_status()
+                contatos = r.json().get("payload", [])
+                if contatos:
+                    break
+            if not contatos:
+                return None
+            contact_id = contatos[0].get("id")
+            r2 = requests.get(
+                f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/contacts/{contact_id}/conversations",
+                headers={"api_access_token": AGENDORCHAT_TOKEN}, timeout=15)
+            if r2.status_code == 429:
+                raise requests.exceptions.HTTPError(f"429 buscando conversas contact={contact_id}")
+            r2.raise_for_status()
+            convs = r2.json().get("payload", [])
+            convs = [c for c in convs if str(c.get("inbox_id")) == str(AGENDORCHAT_INBOX_ID)]
+            if not convs:
+                return None
+            return sorted(convs, key=lambda c: c.get("id") or 0)[-1]
+        except Exception as e:
+            print(f"[lembrete] Tentativa {attempt+1}/3 falhou ao localizar conversa "
+                  f"de {phone}: {e}", flush=True)
+            if attempt < 2:
+                time.sleep(3)
+    return None
 
 
 def deal_tem_marca(deal_id, marcador: str) -> bool:
@@ -3613,13 +3657,26 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     sobre send_agendorchat_message também usar sender.type=='user'), não
     pelo Bot/automação. Decide se um lead silencioso no D+5 é elegível a
     fechar como PERDIDO - SEM CONTATO: só é, se ninguém jamais interveio
-    de verdade nessa conversa."""
+    de verdade nessa conversa.
+
+    Corrigido em 19/08 (bug real, confirmado em produção): a checagem
+    olhava só QUEM enviou (excluindo Luca/Luiz), mas não olhava se a
+    MENSAGEM em si era um template automático disparado por outra conta
+    real (ex: Everton) — como 'prosseguimento_solicitacao' ou
+    'retomada_de_contato_everton'. Um template automático não é uma
+    intervenção humana de verdade, mesmo saindo pela conta de um vendedor
+    real (caso real: Davisson Medeiros, deal ligado a person=70521617,
+    o template 'prosseguimento_solicitacao' saiu pela conta do Everton e
+    fez esse negócio nunca fechar como 'sem contato', mesmo sem nenhuma
+    palavra escrita de verdade por ninguém)."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         for m in msgs:
             if m.get("message_type") == 1 and not m.get("private"):
                 sender = m.get("sender") or {}
-                if sender.get("type") == "user" and not eh_assignee_bot(sender):
+                eh_template_automatico = bool((m.get("additional_attributes") or {}).get("automation_id")
+                                               or (m.get("additional_attributes") or {}).get("template_params"))
+                if sender.get("type") == "user" and not eh_assignee_bot(sender) and not eh_template_automatico:
                     return True
         return False
     except Exception as e:
@@ -3670,6 +3727,26 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     nome_template = {"D1": "followup_silencio_d1_tech",
                       "D3": "followup_silencio_d3_tech",
                       "D5": "followup_silencio_d5_tech"}[tag]
+
+    # Corrigido em 19/08 (bug real, confirmado em produção): pro D5, não
+    # existe próxima etapa "natural" pra sair automaticamente — se a
+    # mudança de etapa (mover_etapa_funil_comercial) falhar por qualquer
+    # motivo depois do envio, o negócio fica preso e a régua bate de novo
+    # dias depois, reenviando o MESMO D5 (caso real: Davisson Medeiros,
+    # D5 enviado em 14/08 e de novo em 19/08 — 5 dias de diferença). Um
+    # marcador único na própria conversa garante que o D5 NUNCA sai duas
+    # vezes, mesmo que a etapa não tenha mudado com sucesso.
+    if tag == "D5":
+        marcador_d5 = "[followup:d5_enviado]"
+        try:
+            msgs_existentes = mensagens_da_conversa(conversation_id)
+            if marcador_existe(msgs_existentes, marcador_d5):
+                print(f"[followup_dias] D5 já tinha sido enviado antes (marcador encontrado) "
+                      f"conv={conversation_id} deal={deal_id} — não reenvia", flush=True)
+                return False
+        except Exception as e:
+            print(f"[followup_dias] Erro ao checar marcador D5 conv={conversation_id}: {e}", flush=True)
+
     tpl = template_por_nome(nome_template)
     if not tpl:
         send_private_note(conversation_id, (
@@ -3693,7 +3770,8 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
                "última mensagem. Se fizer sentido economizar, me chama quando quiser."),
     }[tag]
     enviar_template_conversa(conversation_id, tpl, {"1": nome_saudacao}, texto_completo)
-    send_private_note(conversation_id, f"🔁 Follow-up {tag} enviado ao lead via template.")
+    marcador_nota = " [followup:d5_enviado]" if tag == "D5" else ""
+    send_private_note(conversation_id, f"🔁 Follow-up {tag} enviado ao lead via template.{marcador_nota}")
     espelho_crm(deal_id, f"🤖 Follow-up automático ({tag}) enviado ao lead — silêncio de {tag[1:]} dia(s).")
     print(f"[followup_dias] ✅ {tag} enviado conv={conversation_id} deal={deal_id}", flush=True)
     return True
