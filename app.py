@@ -886,19 +886,26 @@ def admin_atualizar_webhook():
     um novo, só editando o mesmo. Criada porque colar um script grande no
     Console do Railway estava dando erro de paste recorrente. Visitar essa
     URL uma vez no navegador resolve; pode remover essa rota depois."""
+    resultado = {}
     try:
         r = requests.get(
             f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/webhooks",
             headers={"api_access_token": AGENDORCHAT_TOKEN}, timeout=15)
-        resultado = {"busca_status": r.status_code, "busca_corpo": r.text}
+        resultado["busca_status"] = r.status_code
+        resultado["busca_corpo"] = r.text
         r.raise_for_status()
-        webhooks = r.json().get("payload", [])
+        corpo_json = r.json()
+        resultado["tipo_da_resposta"] = str(type(corpo_json))
+        webhooks = corpo_json.get("payload", []) if isinstance(corpo_json, dict) else corpo_json
+        resultado["tipo_de_webhooks"] = str(type(webhooks))
         if not webhooks:
             resultado["erro"] = "Nenhum webhook encontrado — confirma token/conta."
             return jsonify(resultado), 200
 
-        webhook_id = webhooks[0]["id"]
-        subs_atuais = webhooks[0].get("subscriptions", [])
+        primeiro = webhooks[0] if isinstance(webhooks, list) else list(webhooks.values())[0]
+        resultado["primeiro_webhook"] = primeiro
+        webhook_id = primeiro["id"]
+        subs_atuais = primeiro.get("subscriptions", [])
         resultado["webhook_id"] = webhook_id
         resultado["subscriptions_antes"] = subs_atuais
 
@@ -910,14 +917,15 @@ def admin_atualizar_webhook():
         r2 = requests.patch(
             f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/webhooks/{webhook_id}",
             headers={"api_access_token": AGENDORCHAT_TOKEN, "Content-Type": "application/json"},
-            json={"webhook": {"url": webhooks[0]["url"], "subscriptions": nova_lista}},
+            json={"webhook": {"url": primeiro["url"], "subscriptions": nova_lista}},
             timeout=15)
         resultado["subscriptions_depois"] = nova_lista
         resultado["update_status"] = r2.status_code
         resultado["update_corpo"] = r2.text
         return jsonify(resultado), 200
     except Exception as e:
-        return jsonify({"erro": str(e)}), 500
+        resultado["erro"] = f"{type(e).__name__}: {e}"
+        return jsonify(resultado), 500
 
 
 @app.route("/agendor/deal-created", methods=["POST"])
