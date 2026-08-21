@@ -895,18 +895,27 @@ def admin_atualizar_webhook():
         resultado["busca_corpo"] = r.text
         r.raise_for_status()
         corpo_json = r.json()
-        resultado["tipo_da_resposta"] = str(type(corpo_json))
-        webhooks = corpo_json.get("payload", []) if isinstance(corpo_json, dict) else corpo_json
-        resultado["tipo_de_webhooks"] = str(type(webhooks))
+        # Estrutura real confirmada 20/08: {"payload": {"webhooks": [...]}}
+        # — um nível a mais de aninhamento do que eu tinha assumido antes.
+        webhooks = (corpo_json.get("payload") or {}).get("webhooks", [])
+        resultado["total_webhooks"] = len(webhooks)
         if not webhooks:
             resultado["erro"] = "Nenhum webhook encontrado — confirma token/conta."
             return jsonify(resultado), 200
 
-        primeiro = webhooks[0] if isinstance(webhooks, list) else list(webhooks.values())[0]
-        resultado["primeiro_webhook"] = primeiro
-        webhook_id = primeiro["id"]
-        subs_atuais = primeiro.get("subscriptions", [])
+        # Tem 3 webhooks cadastrados (conversation_updated x2, message_created)
+        # — precisa achar especificamente o que já escuta 'message_created',
+        # não pegar o primeiro qualquer.
+        alvo = next((wh for wh in webhooks if "message_created" in (wh.get("subscriptions") or [])), None)
+        if not alvo:
+            resultado["erro"] = "Nenhum webhook com 'message_created' encontrado."
+            resultado["webhooks_encontrados"] = webhooks
+            return jsonify(resultado), 200
+
+        webhook_id = alvo["id"]
+        subs_atuais = alvo.get("subscriptions", [])
         resultado["webhook_id"] = webhook_id
+        resultado["webhook_url"] = alvo["url"]
         resultado["subscriptions_antes"] = subs_atuais
 
         if "message_updated" in subs_atuais:
@@ -917,7 +926,7 @@ def admin_atualizar_webhook():
         r2 = requests.patch(
             f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/webhooks/{webhook_id}",
             headers={"api_access_token": AGENDORCHAT_TOKEN, "Content-Type": "application/json"},
-            json={"webhook": {"url": primeiro["url"], "subscriptions": nova_lista}},
+            json={"webhook": {"url": alvo["url"], "subscriptions": nova_lista}},
             timeout=15)
         resultado["subscriptions_depois"] = nova_lista
         resultado["update_status"] = r2.status_code
