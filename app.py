@@ -879,63 +879,6 @@ def reset_fetch():
     return jsonify({"status": "ok"})
 
 
-@app.route("/admin/atualizar_webhook", methods=["GET"])
-def admin_atualizar_webhook():
-    """Rota temporária (20/08): adiciona 'message_updated' na lista de
-    eventos assinados do webhook do AgendorChat que já existe — sem criar
-    um novo, só editando o mesmo. Criada porque colar um script grande no
-    Console do Railway estava dando erro de paste recorrente. Visitar essa
-    URL uma vez no navegador resolve; pode remover essa rota depois."""
-    resultado = {}
-    try:
-        r = requests.get(
-            f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/webhooks",
-            headers={"api_access_token": AGENDORCHAT_TOKEN}, timeout=15)
-        resultado["busca_status"] = r.status_code
-        resultado["busca_corpo"] = r.text
-        r.raise_for_status()
-        corpo_json = r.json()
-        # Estrutura real confirmada 20/08: {"payload": {"webhooks": [...]}}
-        # — um nível a mais de aninhamento do que eu tinha assumido antes.
-        webhooks = (corpo_json.get("payload") or {}).get("webhooks", [])
-        resultado["total_webhooks"] = len(webhooks)
-        if not webhooks:
-            resultado["erro"] = "Nenhum webhook encontrado — confirma token/conta."
-            return jsonify(resultado), 200
-
-        # Tem 3 webhooks cadastrados (conversation_updated x2, message_created)
-        # — precisa achar especificamente o que já escuta 'message_created',
-        # não pegar o primeiro qualquer.
-        alvo = next((wh for wh in webhooks if "message_created" in (wh.get("subscriptions") or [])), None)
-        if not alvo:
-            resultado["erro"] = "Nenhum webhook com 'message_created' encontrado."
-            resultado["webhooks_encontrados"] = webhooks
-            return jsonify(resultado), 200
-
-        webhook_id = alvo["id"]
-        subs_atuais = alvo.get("subscriptions", [])
-        resultado["webhook_id"] = webhook_id
-        resultado["webhook_url"] = alvo["url"]
-        resultado["subscriptions_antes"] = subs_atuais
-
-        if "message_updated" in subs_atuais:
-            resultado["status"] = "message_updated já estava na lista — nada a fazer."
-            return jsonify(resultado), 200
-
-        nova_lista = subs_atuais + ["message_updated"]
-        r2 = requests.patch(
-            f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/webhooks/{webhook_id}",
-            headers={"api_access_token": AGENDORCHAT_TOKEN, "Content-Type": "application/json"},
-            json={"webhook": {"url": alvo["url"], "subscriptions": nova_lista}},
-            timeout=15)
-        resultado["subscriptions_depois"] = nova_lista
-        resultado["update_status"] = r2.status_code
-        resultado["update_corpo"] = r2.text
-        return jsonify(resultado), 200
-    except Exception as e:
-        resultado["erro"] = f"{type(e).__name__}: {e}"
-        return jsonify(resultado), 500
-
 
 @app.route("/agendor/deal-created", methods=["POST"])
 def agendor_deal_created():
@@ -2395,6 +2338,51 @@ def agendorchat_webhook():
         sender_type  = (body.get("sender") or {}).get("type", "")
         print(f"[webhook] RAW event={event} | message_type={message_type} | sender_type={sender_type}", flush=True)
         print(f"[webhook] RAW payload={json.dumps(body)[:600]}", flush=True)
+
+        # ── message_updated: status real de entrega (20/08, novo) ──────────
+        # Confirmado com o suporte do Agendor: o payload desse evento NÃO
+        # traz o status em si, só avisa "essa mensagem mudou" — é preciso
+        # buscar a listagem de mensagens da conversa pra ler o status real.
+        # Se vier 'failed' (número inválido/sem WhatsApp), o lead nunca teve
+        # chance de responder de verdade — mesmo critério de "sem contato"
+        # (decisão de Ronaldo, 20/08), então move pra 'Perdido - sem contato
+        # (D5)', onde o Everton confere manualmente.
+        if event == "message_updated":
+            msg_id = body.get("id")
+            conversation = body.get("conversation") or {}
+            conversation_id = conversation.get("id")
+            if not msg_id or not conversation_id:
+                return jsonify({}), 200
+            msgs = mensagens_da_conversa(conversation_id)
+            msg_atual = next((m for m in msgs if m.get("id") == msg_id), None)
+            if not msg_atual or msg_atual.get("status") != "failed":
+                return jsonify({}), 200
+            motivo = (msg_atual.get("content_attributes") or {}).get("external_error", "motivo não informado")
+            meta_sender = (conversation.get("meta") or {}).get("sender") or {}
+            phone = meta_sender.get("phone_number", "")
+            print(f"[msg_falhou] Mensagem falhou conv={conversation_id} msg={msg_id} "
+                  f"phone={phone} motivo={motivo}", flush=True)
+            if phone:
+                _, deal = buscar_pessoa_e_negocio(phone)
+                if deal:
+                    # Corrigido 21/08 (Ronaldo): só move pra "sem contato" se
+                    # o negócio AINDA não teve nenhum contato de verdade —
+                    # senão uma mensagem posterior (ex: lembrete) que falhe
+                    # apagaria um progresso real já feito (Contato
+                    # Retornado, Reunião agendada, etc.).
+                    etapa_atual_id = (deal.get("dealStage") or {}).get("id")
+                    etapas_sem_contato_ainda = (ETAPA_NOVO_LEAD, ETAPA_1_CONTATO, ETAPA_2_CONTATO,
+                                                 ETAPA_3_CONTATO, ETAPA_PERDIDO_SEM_CONTATO)
+                    if etapa_atual_id in etapas_sem_contato_ainda:
+                        mover_etapa_funil_comercial(deal["id"], ETAPA_PERDIDO_SEM_CONTATO, permitir_recuo=True)
+                        send_private_note(conversation_id,
+                            f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
+                            f"Movido para 'Perdido - sem contato (D5)' para verificação manual.")
+                    else:
+                        send_private_note(conversation_id,
+                            f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
+                            f"Negócio já teve contato real antes, etapa mantida — verificar manualmente.")
+            return jsonify({}), 200
 
         # Ignora tudo que não seja mensagem nova do lead
         if event != "message_created":
