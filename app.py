@@ -2353,7 +2353,15 @@ def agendorchat_webhook():
             conversation_id = conversation.get("id")
             if not msg_id or not conversation_id:
                 return jsonify({}), 200
+            # Corrigido 22/08 (bug real, confirmado em produção): o Chatwoot
+            # dispara 'message_updated' MAIS DE UMA VEZ pra mesma mensagem
+            # (ex: uma vez ao marcar como falha, outra ao anexar o motivo do
+            # erro) — sem essa trava, a mesma falha gerava nota duplicada
+            # na conversa a cada disparo (visto 2-3x seguidas no mesmo msg).
+            marcador_falha = f"[msg_falha:{msg_id}]"
             msgs = mensagens_da_conversa(conversation_id)
+            if marcador_existe(msgs, marcador_falha):
+                return jsonify({}), 200
             msg_atual = next((m for m in msgs if m.get("id") == msg_id), None)
             if not msg_atual or msg_atual.get("status") != "failed":
                 return jsonify({}), 200
@@ -2377,11 +2385,11 @@ def agendorchat_webhook():
                         mover_etapa_funil_comercial(deal["id"], ETAPA_PERDIDO_SEM_CONTATO, permitir_recuo=True)
                         send_private_note(conversation_id,
                             f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
-                            f"Movido para 'Perdido - sem contato (D5)' para verificação manual.")
+                            f"Movido para 'Perdido - sem contato (D5)' para verificação manual. {marcador_falha}")
                     else:
                         send_private_note(conversation_id,
                             f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
-                            f"Negócio já teve contato real antes, etapa mantida — verificar manualmente.")
+                            f"Negócio já teve contato real antes, etapa mantida — verificar manualmente. {marcador_falha}")
             return jsonify({}), 200
 
         # Ignora tudo que não seja mensagem nova do lead
