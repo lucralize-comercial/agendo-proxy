@@ -249,9 +249,10 @@ def contexto_data_atual() -> str:
 
 
 USAGE_STATS = {
-    "chat":     {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
-    "extracao": {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
-    "outro":    {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+    "chat":         {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+    "extracao":     {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
+    "classificacao": {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},  # Haiku 4.5 (20/08)
+    "outro":        {"chamadas": 0, "input": 0, "output": 0, "cache_read": 0, "cache_write": 0},
 }
 
 
@@ -1266,7 +1267,7 @@ def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
             "Responda APENAS o ISO ou INDEFINIDA, nada mais.\n\n"
             f"Preferência: {preferencia}"
         )
-        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30, tipo=tipo,
+        resp = call_claude([{"role": "user", "content": prompt}], max_tokens=30, tipo="classificacao",
                            model="claude-haiku-4-5-20251001").strip()
         if "INDEFINIDA" in resp.upper():
             return None
@@ -3499,7 +3500,7 @@ Responda apenas com uma palavra: PARADA ou FECHADA."""
         resposta = call_claude(
             [{"role": "user", "content": prompt}], max_tokens=10,
             system="Você classifica o estado de conversas comerciais. Responda só com uma palavra: PARADA ou FECHADA.",
-            model="claude-haiku-4-5-20251001"
+            model="claude-haiku-4-5-20251001", tipo="classificacao"
         )
         return "PARADA" in resposta.upper()
     except Exception as e:
@@ -4017,18 +4018,36 @@ scheduler.add_job(fetch_tasks_job, "interval", hours=2, id="tasks_recorrente")
 scheduler.add_job(varredura_lembretes_safe, "interval", minutes=15, id="lembretes_reuniao")
 def log_resumo_usage():
     """Imprime no log um resumo do consumo de tokens acumulado até agora
-    (desde o último boot), com custo estimado em USD. Preços de referência
-    do Claude Sonnet (input, output, cache write, cache read) — ajustar aqui
-    se a tabela de preços da Anthropic mudar."""
+    (desde o último boot), com custo estimado em USD.
+
+    Corrigido 24/08: 'classificacao' (Haiku 4.5) usa uma tabela de preço
+    BEM mais barata que Sonnet — usar a tabela do Sonnet pra essa categoria
+    inflaria o número artificialmente e esconderia a economia real da
+    troca. ATENÇÃO Ronaldo: os valores de PRECO_HAIKU_* abaixo são minha
+    melhor referência, mas não tenho 100% de certeza que batem exatamente
+    com a tabela atual da Anthropic — vale conferir rapidinho em
+    console.anthropic.com (ou docs.claude.com/pricing) antes de usar esse
+    número pra decisão financeira importante. Os preços do Sonnet
+    (PRECO_INPUT etc.) esses sim já confirmamos antes."""
     PRECO_INPUT       = 3.00  / 1_000_000
     PRECO_OUTPUT       = 15.00 / 1_000_000
     PRECO_CACHE_WRITE = 3.75  / 1_000_000
     PRECO_CACHE_READ  = 0.30  / 1_000_000
 
+    # Haiku 4.5 — CONFIRME em docs.claude.com/pricing antes de confiar 100%
+    PRECO_HAIKU_INPUT       = 1.00  / 1_000_000
+    PRECO_HAIKU_OUTPUT      = 5.00  / 1_000_000
+    PRECO_HAIKU_CACHE_WRITE = 1.25  / 1_000_000
+    PRECO_HAIKU_CACHE_READ  = 0.10  / 1_000_000
+
     total_usd = 0.0
     for tipo, s in USAGE_STATS.items():
-        custo = (s["input"] * PRECO_INPUT + s["output"] * PRECO_OUTPUT
-                  + s["cache_write"] * PRECO_CACHE_WRITE + s["cache_read"] * PRECO_CACHE_READ)
+        if tipo == "classificacao":
+            custo = (s["input"] * PRECO_HAIKU_INPUT + s["output"] * PRECO_HAIKU_OUTPUT
+                      + s["cache_write"] * PRECO_HAIKU_CACHE_WRITE + s["cache_read"] * PRECO_HAIKU_CACHE_READ)
+        else:
+            custo = (s["input"] * PRECO_INPUT + s["output"] * PRECO_OUTPUT
+                      + s["cache_write"] * PRECO_CACHE_WRITE + s["cache_read"] * PRECO_CACHE_READ)
         total_usd += custo
         print(f"[usage-hora] tipo={tipo} chamadas={s['chamadas']} input={s['input']} "
               f"output={s['output']} cache_read={s['cache_read']} cache_write={s['cache_write']} "
