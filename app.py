@@ -163,6 +163,15 @@ LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Ronaldo Cassimiro")  
 LUCA_BOT_NOME_EXIBICAO = os.environ.get("LUCA_BOT_NOME_EXIBICAO", "Luca")  # available_name configurado nessa conta
 NOME_DONO_CONTA_PADRAO = os.environ.get("NOME_DONO_CONTA_PADRAO", "Luiz Santos")  # dono padrão do CRM — nunca escreve pessoalmente pro lead
 
+# Corrigido 25/08 (achado real de Ronaldo): o Luca manda mensagem usando a
+# MESMA conta que Ronaldo usa pra escrever manualmente — pro AgendorChat,
+# as duas coisas são indistinguíveis (mesmo sender.id, mesmo nome). Sem
+# licença sobrando pra criar uma conta separada só pro bot, a saída é essa
+# marca invisível (espaço de largura zero) no final de toda mensagem que
+# o Luca manda via API. Uma mensagem da mesma conta SEM essa marca é
+# necessariamente o Ronaldo digitando de verdade, não o bot.
+LUCA_MARKER = "\u200b"
+
 
 def eh_assignee_bot(assignee: dict) -> bool:
     """Retorna True se o agente atribuído/remetente é o usuário do bot da
@@ -1059,7 +1068,10 @@ def chat():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 def send_agendorchat_message(conversation_id: int, text: str):
-    """Envia resposta do Luca de volta ao lead via API do AgendorChat."""
+    """Envia resposta do Luca de volta ao lead via API do AgendorChat.
+    Adiciona uma marca invisível no final (LUCA_MARKER) — ver comentário
+    na definição da constante — pra depois conseguir distinguir isso de
+    uma mensagem que o Ronaldo escreveu manualmente pela mesma conta."""
     url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     resp = requests.post(
         url,
@@ -1067,7 +1079,7 @@ def send_agendorchat_message(conversation_id: int, text: str):
             "api_access_token": LUCA_SEND_TOKEN,
             "Content-Type":     "application/json",
         },
-        json={"content": text, "message_type": "outgoing", "private": False},
+        json={"content": text + LUCA_MARKER, "message_type": "outgoing", "private": False},
         timeout=15,
     )
     resp.raise_for_status()
@@ -2436,6 +2448,37 @@ def agendorchat_webhook():
                                   f"enviado conv={conv_id_saudacao}", flush=True)
                     except Exception as e:
                         print(f"[webhook] Erro ao checar saudação atrasada conv={conv_id_saudacao}: {e}", flush=True)
+
+            # ── Corrigido 25/08 (Ronaldo): mensagem humana genuína também
+            # merece um follow-up de silêncio, só que com uma janela maior
+            # (4h, só dentro do horário comercial) — diferente da mensagem
+            # do Luca (1h, texto mais leve). Mesmo esquema da marca
+            # invisível usada em humano_realmente_respondeu.
+            if message_type == "outgoing":
+                sender_out = body.get("sender") or {}
+                content_out = body.get("content") or ""
+                automation_id_out = (body.get("additional_attributes") or {}).get("automation_id")
+                template_params_out = (body.get("additional_attributes") or {}).get("template_params")
+                nome_sender_out = (sender_out.get("name") or "").strip().lower()
+                eh_conta_do_luca = nome_sender_out == LUCA_BOT_NOME_REAL.strip().lower()
+                eh_mensagem_do_bot = eh_conta_do_luca and LUCA_MARKER in content_out
+                eh_generico_ou_automatico = (sender_out.get("type") != "user" or automation_id_out
+                                              or template_params_out or eh_assignee_bot(sender_out))
+                if not eh_mensagem_do_bot and not eh_generico_ou_automatico:
+                    conv_id_humano = (body.get("conversation") or {}).get("id")
+                    if conv_id_humano and mensagem_precisa_resposta(content_out):
+                        conv_key_humano = str(conv_id_humano)
+                        conv_humano = conversation_histories.setdefault(conv_key_humano, {
+                            "system": SYSTEM_PROMPT, "messages": [], "note_id": None, "lead_data": {},
+                        })
+                        conv_humano["humano_aguardando_desde"] = time.time()
+                        conv_humano["followup_humano_enviado"] = False
+                        print(f"[webhook] Mensagem humana genuína e precisa de resposta, iniciando "
+                              f"espera de 4h conv={conv_id_humano}", flush=True)
+                    elif conv_id_humano:
+                        print(f"[webhook] Mensagem humana genuína mas não precisa de resposta, "
+                              f"sem follow-up conv={conv_id_humano}", flush=True)
+
             print(f"[webhook] IGNORADO message_type={message_type}", flush=True)
             return jsonify({}), 200
 
@@ -2460,12 +2503,16 @@ def agendorchat_webhook():
             # nunca pior que o comportamento antigo.
             assignee = (body.get("conversation") or {}).get("meta", {}).get("assignee")
             print(f"[webhook] get_conversation_details falhou, usando snapshot do payload conv={conversation_id}", flush=True)
-        if assignee and assignee.get("type") == "user" and not eh_assignee_bot(assignee):
-            if humano_realmente_respondeu(conversation_id):
-                print(f"[webhook] IGNORADO agente humano atribuído: {assignee.get('name')}", flush=True)
-                return jsonify({}), 200
-            print(f"[webhook] Atribuído a {assignee.get('name')} mas sem resposta escrita — "
-                  f"Luca segue normalmente conv={conversation_id}", flush=True)
+        # Corrigido 25/08 (Ronaldo): não depende mais de haver alguém
+        # EXPLICITAMENTE atribuído — o que importa é só quando foi a
+        # última mensagem humana genuína, não quem está no campo
+        # "assignee". Dá 1h de folga pro humano continuar sem o Luca
+        # atropelar; depois disso, Luca retoma normalmente.
+        segundos_humano = segundos_desde_ultima_intervencao_humana(conversation_id)
+        if segundos_humano is not None and segundos_humano < 3600:
+            print(f"[webhook] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
+                  f"dentro da janela de 1h conv={conversation_id}", flush=True)
+            return jsonify({}), 200
 
         # ── Extrai campos do payload ──────────────────────────────────────────
         message_text    = (body.get("content") or "").strip()
@@ -2626,6 +2673,9 @@ def agendorchat_webhook():
         # Lead respondeu — cancela o follow-up de 1h de silêncio, se estava contando
         conv["luca_aguardando_desde"] = None
         conv["followup_1h_enviado"] = False
+        # Idem pro follow-up de 4h de silêncio após mensagem humana (25/08)
+        conv["humano_aguardando_desde"] = None
+        conv["followup_humano_enviado"] = False
 
         # ── Agrupamento de mensagens em sequência rápida ──────────────────────
         # Marca esta como a versão mais recente da conversa; a thread em
@@ -2682,6 +2732,128 @@ def agendorchat_webhook():
 # se há mensagem do lead pendente de resposta. Se sim, o Luca assume e responde.
 # ═════════════════════════════════════════════════════════════════════════════
 
+def tentar_retomar_conversa(conversation_id: int, origem: str = "conv_updated") -> bool:
+    """Função compartilhada (25/08): verifica se há mensagem do lead
+    pendente sem resposta e, se sim, faz o Luca assumir e responder — a
+    mesma lógica que já existia dentro do webhook conversation_updated,
+    agora extraída pra também poder ser chamada pela verificação periódica
+    de segurança (o evento do AgendorChat não é garantido disparar bem na
+    marca de 1h após a intervenção humana). Retorna True se disparou a
+    retomada, False se não havia nada a fazer."""
+    try:
+        conv_key = str(conversation_id)
+        last = get_last_message_info(conversation_id)
+        if not last:
+            print(f"[retomada:{origem}] Sem mensagens na conversa conv={conversation_id}", flush=True)
+            return False
+        if last.get("private") or last.get("message_type") != 0:
+            print(f"[retomada:{origem}] Última mensagem não é do lead conv={conversation_id}", flush=True)
+            return False
+
+        conv = conversation_histories.get(conv_key)
+        last_id = last.get("id")
+        if conv and last_id and conv.get("last_responded_msg_id") == last_id:
+            print(f"[retomada:{origem}] Última mensagem já respondida pelo Luca conv={conversation_id}", flush=True)
+            return False
+        # Guard contra disparos duplicados (webhook + timer batendo perto):
+        # se já existe uma retomada agendada/em andamento pra essa mesma
+        # mensagem, ignora.
+        if conv and last_id and conv.get("retomada_msg_id") == last_id:
+            print(f"[retomada:{origem}] Já em andamento pra msg={last_id} conv={conversation_id}", flush=True)
+            return False
+
+        detalhe = get_conversation_details(conversation_id) or {}
+        meta = detalhe.get("meta") or {}
+        sender_info = meta.get("sender") or {}
+        contact_name = sender_info.get("name", "")
+        contact_phone = sender_info.get("phone_number", "")
+        contact_inbox = detalhe.get("contact_inbox") or {}
+        inbox_identifier = contact_inbox.get("source_id", "")
+        contact_identifier = contact_inbox.get("pubsub_token", "")
+
+        if conv_key not in conversation_histories:
+            # Não existe entrada anterior nesta memória do processo — não há
+            # nada de "conv" pra preservar aqui (diferente do reset por
+            # conversa reaberta, onde já existe um "conv" anterior).
+            extra = ""
+            if contact_name:
+                extra += f"\n\nINFORMAÇÃO DO CONTATO: o lead se chama {contact_name}."
+            if contact_phone:
+                extra += f" Telefone/WhatsApp já disponível: {contact_phone}. NUNCA peça o telefone."
+            conversation_histories[conv_key] = {
+                "system":    SYSTEM_PROMPT + extra,
+                "messages":  [],
+                "note_id":   None,
+                "lead_data": {"nome": contact_name},
+                "last_msg_at": time.time(),
+            }
+        conv = conversation_histories[conv_key]
+        if contact_phone:
+            conv["phone"] = contact_phone
+
+        # Sincroniza o histórico real (inclui a mensagem pendente do lead e o
+        # trecho do atendimento humano, para o Luca ter o contexto completo)
+        remote_history = fetch_conversation_history(conversation_id)
+        if remote_history:
+            conv["messages"] = remote_history
+        if not conv["messages"] or conv["messages"][-1]["role"] != "user":
+            print(f"[retomada:{origem}] Histórico sem mensagem pendente do lead conv={conversation_id}", flush=True)
+            return False
+
+        conv["last_msg_at"] = time.time()
+        conv["message_count"] = max(conv.get("message_count", 0), 1)  # não é primeira mensagem
+        conv["was_resolved"] = False  # histórico já sincronizado; evita reset indevido depois
+        conv["retomada_msg_id"] = last_id  # marca antes de disparar — bloqueia eventos duplicados
+        msg_token = time.time()
+        conv["latest_msg_token"] = msg_token
+
+        print(f"[retomada:{origem}] Luca assume conv={conversation_id}", flush=True)
+        threading.Thread(
+            target=_processar_resposta_luca,
+            args=(conv_key, conversation_id, msg_token, last_id, False,
+                  False, last.get("content", ""), contact_name,
+                  inbox_identifier, contact_identifier, 2.5),
+            daemon=True,
+        ).start()
+        return True
+    except Exception as e:
+        print(f"[retomada:{origem}] Erro conv={conversation_id}: {e}", flush=True)
+        return False
+
+
+def verificar_retomada_apos_silencio_humano():
+    """Criado 25/08 (Ronaldo): rede de segurança pro caso do evento
+    conversation_updated do AgendorChat não disparar bem na marca de 1h
+    depois de uma intervenção humana com mensagem do lead pendente. Varre
+    (a cada 15 min) as conversas ativas na memória, e para cada uma que já
+    passou 1h desde a última mensagem humana genuína, tenta retomar.
+    Limitado a conversas com atividade nas últimas 24h, pra não varrer
+    histórico morto pra sempre."""
+    agora = time.time()
+    for conv_key in list(conversation_histories.keys()):
+        try:
+            conversation_id = int(conv_key)
+        except (TypeError, ValueError):
+            continue
+        conv = conversation_histories.get(conv_key)
+        if not conv or conv.get("was_resolved"):
+            continue
+        last_msg_at = conv.get("last_msg_at") or 0
+        if agora - last_msg_at > 86400:  # sem atividade há mais de 24h — ignora
+            continue
+        segundos_humano = segundos_desde_ultima_intervencao_humana(conversation_id)
+        if segundos_humano is None or segundos_humano < 3600:
+            continue  # nunca teve humano, ou ainda dentro da janela de 1h
+        tentar_retomar_conversa(conversation_id, origem="timer_1h")
+
+
+def verificar_retomada_apos_silencio_humano_safe():
+    try:
+        verificar_retomada_apos_silencio_humano()
+    except Exception as e:
+        print(f"[retomada:timer_1h] Erro geral na varredura: {e}", flush=True)
+
+
 @app.route("/agendorchat/conversation-updated", methods=["POST", "OPTIONS"])
 def agendorchat_conversation_updated():
     if request.method == "OPTIONS":
@@ -2716,92 +2888,21 @@ def agendorchat_conversation_updated():
             print(f"[conv_updated] IGNORADO — conversa resolvida", flush=True)
             return jsonify({}), 200
 
-        # Se ainda está atribuída a alguém (que não seja o bot), só recua se
-        # esse humano já escreveu de fato — não basta estar atribuído
-        # (caso Victor/Luiz Santos: automação atribui sem o humano ter agido)
-        if assignee and not eh_assignee_bot(assignee):
-            if humano_realmente_respondeu(conversation_id):
-                print(f"[conv_updated] IGNORADO — ainda atribuída a {assignee.get('name')}", flush=True)
-                return jsonify({}), 200
-            print(f"[conv_updated] Atribuída a {assignee.get('name')} mas sem resposta escrita — "
-                  f"seguindo verificação normal conv={conversation_id}", flush=True)
+        # Corrigido 25/08 (Ronaldo): mesma lógica do webhook principal —
+        # não depende de assignee, só de quando foi a última mensagem
+        # humana genuína. 1h de folga antes do Luca retomar.
+        segundos_humano = segundos_desde_ultima_intervencao_humana(conversation_id)
+        if segundos_humano is not None and segundos_humano < 3600:
+            print(f"[conv_updated] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
+                  f"dentro da janela de 1h conv={conversation_id}", flush=True)
+            return jsonify({}), 200
 
         # ── Desatribuída e aberta: verifica se há mensagem do lead sem resposta ─
         # Cenário: humano se atribui, conclui/abandona, conversa é desatribuída
         # com o lead pendente. O Luca assume e responde.
-        conv_key = str(conversation_id)
-        last = get_last_message_info(conversation_id)
-        if not last:
-            print(f"[conv_updated] IGNORADO — sem mensagens na conversa", flush=True)
-            return jsonify({}), 200
-        if last.get("private") or last.get("message_type") != 0:
-            print(f"[conv_updated] IGNORADO — última mensagem não é do lead", flush=True)
-            return jsonify({}), 200
-
-        conv = conversation_histories.get(conv_key)
-        last_id = last.get("id")
-        if conv and last_id and conv.get("last_responded_msg_id") == last_id:
-            print(f"[conv_updated] IGNORADO — última mensagem já respondida pelo Luca", flush=True)
-            return jsonify({}), 200
-        # Guard contra eventos conversation_updated duplicados: se já existe uma
-        # retomada agendada/em andamento para esta mesma mensagem, ignora.
-        if conv and last_id and conv.get("retomada_msg_id") == last_id:
-            print(f"[conv_updated] IGNORADO — retomada já em andamento para msg={last_id}", flush=True)
-            return jsonify({}), 200
-
-        # ── Lead pendente de resposta — Luca assume a conversa ────────────────
-        meta_sender   = (conversation.get("meta") or {}).get("sender") or {}
-        contact_name  = meta_sender.get("name", "")
-        contact_phone = meta_sender.get("phone_number", "")
-        contact_inbox = conversation.get("contact_inbox") or {}
-        inbox_identifier   = contact_inbox.get("source_id", "")
-        contact_identifier = contact_inbox.get("pubsub_token", "")
-
-        if conv_key not in conversation_histories:
-            # Não existe entrada anterior nesta memória do processo — não há
-            # nada de "conv" pra preservar aqui (diferente do reset por
-            # conversa reaberta, onde já existe um "conv" anterior).
-            extra = ""
-            if contact_name:
-                extra += f"\n\nINFORMAÇÃO DO CONTATO: o lead se chama {contact_name}."
-            if contact_phone:
-                extra += f" Telefone/WhatsApp já disponível: {contact_phone}. NUNCA peça o telefone."
-            conversation_histories[conv_key] = {
-                "system":    SYSTEM_PROMPT + extra,
-                "messages":  [],
-                "note_id":   None,
-                "lead_data": {"nome": contact_name},
-                "last_msg_at": time.time(),
-            }
-        conv = conversation_histories[conv_key]
-        if contact_phone:
-            conv["phone"] = contact_phone
-
-        # Sincroniza o histórico real (inclui a mensagem pendente do lead e o
-        # trecho do atendimento humano, para o Luca ter o contexto completo)
-        remote_history = fetch_conversation_history(conversation_id)
-        if remote_history:
-            conv["messages"] = remote_history
-        if not conv["messages"] or conv["messages"][-1]["role"] != "user":
-            print(f"[conv_updated] IGNORADO — histórico sem mensagem pendente do lead", flush=True)
-            return jsonify({}), 200
-
-        conv["last_msg_at"] = time.time()
-        conv["message_count"] = max(conv.get("message_count", 0), 1)  # não é primeira mensagem
-        conv["was_resolved"] = False  # histórico já sincronizado; evita reset indevido depois
-        conv["retomada_msg_id"] = last_id  # marca antes de disparar — bloqueia eventos duplicados
-        msg_token = time.time()
-        conv["latest_msg_token"] = msg_token
-
-        print(f"[conv_updated] RETOMADA — desatribuída com mensagem pendente, Luca assume conv={conversation_id}", flush=True)
-        threading.Thread(
-            target=_processar_resposta_luca,
-            args=(conv_key, conversation_id, msg_token, last_id, False,
-                  False, last.get("content", ""), contact_name,
-                  inbox_identifier, contact_identifier, 2.5),
-            daemon=True,
-        ).start()
-        return jsonify({"status": "retomada"}), 200
+        if tentar_retomar_conversa(conversation_id, origem="conv_updated"):
+            return jsonify({"status": "retomada"}), 200
+        return jsonify({}), 200
 
     except Exception as e:
         print(f"[conv_updated] Erro: {e}", flush=True)
@@ -3066,7 +3167,17 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     já tinha se apresentado e feito uma pergunta, mas o Luca respondeu a
     próxima mensagem da lead mesmo assim). Uma vez que um humano de
     verdade escreveu QUALQUER coisa na conversa, ele está no comando —
-    olha a conversa inteira, não só o trecho após a última msg do lead."""
+    olha a conversa inteira, não só o trecho após a última msg do lead.
+
+    Corrigido em 25/08 (achado real de Ronaldo): mesmo com a correção
+    acima, o Luca continuava respondendo por cima de mensagens que o
+    próprio Ronaldo escrevia manualmente — porque ele usa a MESMA conta
+    que o Luca usa pra enviar (sem licença sobrando pra separar). Agora
+    usa a marca invisível (LUCA_MARKER) pra distinguir: uma mensagem da
+    conta do Ronaldo COM a marca é o próprio Luca (exclui); uma mensagem
+    da MESMA conta SEM a marca é o Ronaldo digitando de verdade (conta
+    como humano). Pra qualquer outra conta (ex: dono padrão do CRM), a
+    exclusão continua sendo total, já que o Luca nunca envia por ela."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
@@ -3075,34 +3186,62 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
         for m in dialogo:
             if m.get("message_type") == 1:
                 sender = m.get("sender") or {}
-                # CRÍTICO: send_agendorchat_message manda as respostas do
-                # próprio Luca com o token do bot, e a plataforma registra
-                # isso como sender.type == "user" — IGUAL a um humano de
-                # verdade. Sem excluir o bot aqui, o Luca podia encontrar a
-                # PRÓPRIA resposta anterior e concluir que um humano já
-                # respondeu, calando-se para sempre (bug real: caso Pietro/
-                # Luiz Santos, 07/08).
-                #
-                # 13/08 (2ª rodada): mesmo depois da correção anterior
-                # (olhar a conversa inteira), o Luca continuou respondendo
-                # por cima do Everton — caso real: Everton/Andressa. Cheguei
-                # a tentar remover a exigência de sender.type=="user", mas
-                # revertido: isso arriscava um bug PIOR — muitas mensagens
-                # automáticas aparecem atribuídas ao Luiz Santos (mesmo
-                # problema não resolvido do "dono da conta"), e sem essa
-                # checagem o código passaria a interpretar QUALQUER
-                # mensagem automática do Luiz como "humano respondeu",
-                # calando o Luca em quase todo lead novo. Mantido o check
-                # original; só adicionado o log de diagnóstico abaixo, pra
-                # ver o formato real do sender na próxima ocorrência antes
-                # de mudar comportamento de novo.
-                print(f"[handoff] DEBUG sender bruto conv={conversation_id}: {sender}", flush=True)
-                if sender.get("type") == "user" and not eh_assignee_bot(sender):
+                if sender.get("type") != "user":
+                    continue
+                nome_sender = (sender.get("name") or "").strip().lower()
+                eh_conta_do_luca = nome_sender == LUCA_BOT_NOME_REAL.strip().lower()
+                if eh_conta_do_luca:
+                    # Mesma conta do bot: só é de verdade o Luca se tiver a marca.
+                    if LUCA_MARKER not in (m.get("content") or ""):
+                        return True  # Ronaldo escreveu manualmente por essa conta
+                    continue
+                if not eh_assignee_bot(sender):
                     return True
         return False
     except Exception as e:
         print(f"[handoff] Erro ao checar se humano respondeu conv={conversation_id}: {e}", flush=True)
         return True  # fail-safe: em erro, assume que respondeu (nunca atropela atendimento humano)
+
+
+def segundos_desde_ultima_intervencao_humana(conversation_id: int):
+    """Retorna quantos segundos faziam desde a ÚLTIMA mensagem humana genuína
+    (mesmo esquema de detecção de humano_realmente_respondeu), ou None se
+    nenhum humano jamais escreveu nessa conversa.
+
+    Criado 25/08 (Ronaldo): antes, uma vez que um humano escrevia, o Luca
+    se calava PRA SEMPRE naquela conversa (bug de fundo: a checagem também
+    só rodava se tivesse alguém EXPLICITAMENTE atribuído — se a conversa
+    estivesse sem atribuição, o Luca podia responder na hora mesmo com
+    intervenção humana recente, e se estivesse atribuída, ficava calado
+    sem limite de tempo). Agora dá pra dar ao humano uma janela de espera
+    (1h) antes do Luca retomar — e a checagem não depende mais de haver
+    alguém atribuído, só de quando foi a última mensagem humana de
+    verdade, seja quem for."""
+    try:
+        msgs = mensagens_da_conversa(conversation_id)
+        dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
+                   and not (m.get("additional_attributes") or {}).get("automation_id")
+                   and "Em breve um de nossos consultores dará andamento" not in (m.get("content") or "")]
+        ultima_humana_em = None
+        for m in dialogo:
+            if m.get("message_type") == 1:
+                sender = m.get("sender") or {}
+                if sender.get("type") != "user":
+                    continue
+                nome_sender = (sender.get("name") or "").strip().lower()
+                eh_conta_do_luca = nome_sender == LUCA_BOT_NOME_REAL.strip().lower()
+                if eh_conta_do_luca:
+                    if LUCA_MARKER not in (m.get("content") or ""):
+                        ultima_humana_em = m.get("created_at") or ultima_humana_em
+                    continue
+                if not eh_assignee_bot(sender):
+                    ultima_humana_em = m.get("created_at") or ultima_humana_em
+        if ultima_humana_em is None:
+            return None
+        return time.time() - float(ultima_humana_em)
+    except Exception as e:
+        print(f"[handoff] Erro ao calcular tempo desde intervenção humana conv={conversation_id}: {e}", flush=True)
+        return 0  # fail-safe: em erro, assume "acabou de acontecer" — nunca atropela atendimento humano
 
 
 def mensagens_da_conversa(conversation_id):
@@ -3508,6 +3647,36 @@ Responda apenas com uma palavra: PARADA ou FECHADA."""
         return True  # fail-open: em erro, mantém comportamento anterior (permite envio)
 
 
+def mensagem_precisa_resposta(texto: str) -> bool:
+    """Criado 25/08 (Ronaldo): antes de ligar o cronômetro de 4h de
+    silêncio após uma mensagem humana, checa se essa mensagem específica
+    realmente PEDE algo do lead (uma pergunta, uma escolha, uma
+    confirmação) ou se já é uma afirmação que se encerra por si só (ex:
+    'já vou providenciar o CNAE e te mando até o final do dia'). Nesse
+    segundo caso, não faz sentido cobrar resposta — a conversa
+    simplesmente acaba ali, sem follow-up nenhum."""
+    try:
+        prompt = f"""Aqui está uma mensagem que um consultor comercial mandou pro cliente:
+
+"{texto}"
+
+Essa mensagem PEDE algo de volta do cliente (uma resposta, escolha, confirmação,
+informação)? Ou ela já é uma afirmação/aviso que se encerra por si só, sem
+esperar nada do cliente (ex: uma confirmação de que algo será feito, uma
+despedida, um agradecimento)?
+
+Responda apenas com uma palavra: PRECISA ou NAO_PRECISA."""
+        resposta = call_claude(
+            [{"role": "user", "content": prompt}], max_tokens=10,
+            system="Você classifica se uma mensagem comercial pede resposta do cliente. Responda só com uma palavra: PRECISA ou NAO_PRECISA.",
+            model="claude-haiku-4-5-20251001", tipo="classificacao"
+        )
+        return "NAO_PRECISA" not in resposta.upper()
+    except Exception as e:
+        print(f"[followup4h] Erro ao classificar necessidade de resposta: {e}", flush=True)
+        return True  # fail-safe: em erro, assume que precisa (comportamento anterior)
+
+
 def verificar_followup_1h_silencio():
     """A cada 15 min, verifica conversas em que o Luca respondeu por último e
     o lead ficou 1h+ sem responder. Manda uma mensagem única puxando o lead
@@ -3547,8 +3716,12 @@ def verificar_followup_1h_silencio():
 
         nome = (conv.get("contact_name_cache") or conv.get("lead_data", {}).get("nome") or "").strip()
         primeiro_nome = nome.split(" ")[0] if nome else ""
-        texto = (f"{primeiro_nome}, acho que peguei você num momento ruim. "
-                 f"Qual o melhor horário pra gente conversar?") if primeiro_nome else                 ("Acho que peguei você num momento ruim. Qual o melhor horário pra gente conversar?")
+        # Texto simplificado (25/08, Ronaldo) — versão mais leve, já que a
+        # versão "acho que peguei você num momento ruim" passou a ser usada
+        # no follow-up de 4h após mensagem HUMANA (ver
+        # verificar_followup_4h_silencio_humano abaixo).
+        texto = (f"Oi, {primeiro_nome}.\nVocê ainda está por aí?") if primeiro_nome else \
+                ("Oi!\nVocê ainda está por aí?")
 
         try:
             send_agendorchat_message(conversation_id, texto)
@@ -3563,6 +3736,63 @@ def verificar_followup_1h_silencio_safe():
         verificar_followup_1h_silencio()
     except Exception as e:
         print(f"[followup1h] Erro geral na varredura: {e}", flush=True)
+
+
+def verificar_followup_4h_silencio_humano():
+    """Criado 25/08 (Ronaldo): igual ao follow-up de 1h, mas pra quando foi
+    um HUMANO de verdade (não o Luca) quem mandou a última mensagem — o
+    timer é ligado no webhook principal, quando detecta uma mensagem
+    outgoing genuína (ver bloco de detecção em agendorchat_webhook). Janela
+    maior (4h em vez de 1h) porque um lead demora mais pra responder um
+    humano de verdade do que uma mensagem automática do Luca — e só dentro
+    do horário comercial (8h-20h BRT, mesma janela já usada no
+    followup_dias), pra não mandar isso de madrugada."""
+    agora_brt = datetime.utcnow() - timedelta(hours=3)
+    if not (8 <= agora_brt.hour < 20):
+        return
+    agora = time.time()
+    for conv_key, conv in list(conversation_histories.items()):
+        aguardando_desde = conv.get("humano_aguardando_desde")
+        if not aguardando_desde or conv.get("followup_humano_enviado"):
+            continue
+        if conv.get("crm_registrado"):
+            continue  # reunião já agendada com sucesso — silêncio é esperado
+        elapsed = agora - aguardando_desde
+        if elapsed < 14400:  # 4h
+            continue
+        try:
+            conversation_id = int(conv_key)
+        except (TypeError, ValueError):
+            continue
+
+        detalhe = get_conversation_details(conversation_id) or {}
+        status = detalhe.get("status")
+        if status == "resolved":
+            continue
+
+        if not conversa_parece_estagnada(conversation_id):
+            print(f"[followup4h] Pulado — conversa parece concluída naturalmente conv={conversation_id}", flush=True)
+            continue
+
+        nome = (conv.get("contact_name_cache") or conv.get("lead_data", {}).get("nome") or "").strip()
+        primeiro_nome = nome.split(" ")[0] if nome else ""
+        texto = (f"{primeiro_nome}, acho que peguei você num momento ruim. "
+                 f"Qual o melhor horário pra gente conversar?") if primeiro_nome else \
+                ("Acho que peguei você num momento ruim. Qual o melhor horário pra gente conversar?")
+
+        try:
+            send_agendorchat_message(conversation_id, texto)
+            conv["followup_humano_enviado"] = True
+            print(f"[followup4h] Enviado conv={conversation_id} nome={primeiro_nome!r}", flush=True)
+        except Exception as e:
+            print(f"[followup4h] Erro ao enviar conv={conversation_id}: {e}", flush=True)
+
+
+def verificar_followup_4h_silencio_humano_safe():
+    try:
+        verificar_followup_4h_silencio_humano()
+    except Exception as e:
+        print(f"[followup4h] Erro geral na varredura: {e}", flush=True)
 
 
 # ── Follow-up automático de silêncio (D+1 / D+3 / D+5) ───────────────────────
@@ -3724,15 +3954,29 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     real (caso real: Davisson Medeiros, deal ligado a person=70521617,
     o template 'prosseguimento_solicitacao' saiu pela conta do Everton e
     fez esse negócio nunca fechar como 'sem contato', mesmo sem nenhuma
-    palavra escrita de verdade por ninguém)."""
+    palavra escrita de verdade por ninguém).
+
+    Corrigido em 25/08: mesmo esquema do humano_realmente_respondeu — usa
+    LUCA_MARKER pra distinguir mensagem da conta do Ronaldo enviada pelo
+    Luca (com marca) de mensagem que o Ronaldo escreveu manualmente pela
+    mesma conta (sem marca, conta como humano de verdade)."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         for m in msgs:
             if m.get("message_type") == 1 and not m.get("private"):
                 sender = m.get("sender") or {}
+                if sender.get("type") != "user":
+                    continue
                 eh_template_automatico = bool((m.get("additional_attributes") or {}).get("automation_id")
                                                or (m.get("additional_attributes") or {}).get("template_params"))
-                if sender.get("type") == "user" and not eh_assignee_bot(sender) and not eh_template_automatico:
+                if eh_template_automatico:
+                    continue
+                nome_sender = (sender.get("name") or "").strip().lower()
+                if nome_sender == LUCA_BOT_NOME_REAL.strip().lower():
+                    if LUCA_MARKER not in (m.get("content") or ""):
+                        return True  # Ronaldo escreveu manualmente por essa conta
+                    continue
+                if not eh_assignee_bot(sender):
                     return True
         return False
     except Exception as e:
@@ -4058,6 +4302,8 @@ def log_resumo_usage():
 scheduler.add_job(mover_novos_leads_para_1contato_safe, "interval", minutes=15, id="mover_novos_leads")
 scheduler.add_job(log_resumo_usage, "interval", hours=1, id="usage_resumo_horario")
 scheduler.add_job(verificar_followup_1h_silencio_safe, "interval", minutes=15, id="followup_1h_silencio")
+scheduler.add_job(verificar_followup_4h_silencio_humano_safe, "interval", minutes=15, id="followup_4h_silencio_humano")
+scheduler.add_job(verificar_retomada_apos_silencio_humano_safe, "interval", minutes=15, id="retomada_apos_silencio_humano")
 scheduler.add_job(verificar_followup_dias_silencio_safe, "interval", hours=3, id="followup_dias_silencio")
 scheduler.add_job(fetch_deals_safe, "date", run_date=datetime.now() + timedelta(seconds=5), id="fetch_inicial")
 scheduler.start()
