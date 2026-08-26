@@ -1091,7 +1091,7 @@ def resolver_conversa_agendorchat(conversation_id: int) -> bool:
     endpoint padrão do Chatwoot (API por trás do AgendorChat). NÃO TESTADO
     ainda contra a API real — mesma cautela que já foi necessária com
     outros endpoints não documentados nesse projeto (due_date, dealStage,
-    assigned_users). Usado depois do follow-up de dias (D+1/D+3/D+5): manda
+    assigned_users). Usado depois do follow-up de dias (D+1/D+3/D+5/D+7/D+10): manda
     a mensagem, reabre naturalmente, e o Luca fecha de novo — assim a
     caixa de conversas "abertas" no AgendorChat só mostra o que realmente
     precisa de atenção humana (decisão de Ronaldo, 13/08)."""
@@ -1262,19 +1262,35 @@ def resolver_campo_agendada_por():
 
 
 def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
-    """Converte a preferência do lead ('terça às 12h10') em ISO usando o Claude,
-    que já recebe a data atual de Brasília no system. Retorna ISO ou None.
+    """Converte a preferência do lead ('terça às 12h10') em ISO usando o Claude.
     tipo: rótulo pro rastreamento de custo por hora (ver [usage-hora]) —
     "agendamento" quando chamado no fechamento do CRM, "disponibilidade"
     quando chamado na checagem em tempo real de agenda (11/08), pra não
-    misturar esse custo com o de "chat" nem esconder ele lá dentro."""
+    misturar esse custo com o de "chat" nem esconder ele lá dentro.
+
+    Corrigido 26/08 (bug real, confirmado com o lead Pedrinho): o
+    docstring antigo desta função dizia que o Claude 'já recebe a data
+    atual de Brasília no system', mas isso nunca foi implementado de
+    verdade — a chamada usava o system padrão (SYSTEM_PROMPT, o persona
+    do Luca, sem nenhuma data ou fuso horário). Sem esse ancoramento, o
+    Haiku confirmou 14h com o lead na conversa mas devolveu '17:00' no
+    ISO — exatamente +3h, o deslocamento BRT->UTC — provavelmente por
+    inferir (sem instrução em contrário) que um horário em formato ISO
+    deveria estar em UTC. Agora o prompt fixa explicitamente a data/hora
+    atual em Brasília E deixa claro que o horário pedido já é local
+    (BRT), sem conversão nenhuma."""
     if not preferencia or not preferencia.strip():
         return None
     try:
+        agora_brt = datetime.utcnow() - timedelta(hours=3)
         prompt = (
+            f"Data e hora atuais em Brasília (BRT, UTC-3): {agora_brt.strftime('%Y-%m-%dT%H:%M')} "
+            f"({agora_brt.strftime('%A')}).\n\n"
             "Converta a preferência de reunião abaixo para data e hora futuras no formato "
-            "ISO exato AAAA-MM-DDTHH:MM (ex: 2026-07-15T10:00), usando a data atual "
-            "informada no sistema como referência. Se a preferência não tiver informação "
+            "ISO exato AAAA-MM-DDTHH:MM (ex: 2026-07-15T10:00), usando a data atual acima como "
+            "referência. IMPORTANTE: o horário na preferência já está no horário local de "
+            "Brasília (BRT) — responda no MESMO horário local, sem converter para UTC nem "
+            "aplicar nenhum deslocamento de fuso. Se a preferência não tiver informação "
             "suficiente para determinar data e hora, responda apenas INDEFINIDA.\n"
             "Responda APENAS o ISO ou INDEFINIDA, nada mais.\n\n"
             f"Preferência: {preferencia}"
@@ -2393,7 +2409,8 @@ def agendorchat_webhook():
                     # Retornado, Reunião agendada, etc.).
                     etapa_atual_id = (deal.get("dealStage") or {}).get("id")
                     etapas_sem_contato_ainda = (ETAPA_NOVO_LEAD, ETAPA_1_CONTATO, ETAPA_2_CONTATO,
-                                                 ETAPA_3_CONTATO, ETAPA_PERDIDO_SEM_CONTATO)
+                                                 ETAPA_3_CONTATO, ETAPA_4_CONTATO_D5, ETAPA_5_CONTATO_D7,
+                                                 ETAPA_PERDIDO_SEM_CONTATO)
                     if etapa_atual_id in etapas_sem_contato_ainda:
                         mover_etapa_funil_comercial(deal["id"], ETAPA_PERDIDO_SEM_CONTATO, permitir_recuo=True)
                         send_private_note(conversation_id,
@@ -3795,22 +3812,25 @@ def verificar_followup_4h_silencio_humano_safe():
         print(f"[followup4h] Erro geral na varredura: {e}", flush=True)
 
 
-# ── Follow-up automático de silêncio (D+1 / D+3 / D+5) ───────────────────────
-# Desenho confirmado com Ronaldo em 05/08 — a régua de silêncio USA as
+# ── Follow-up automático de silêncio (D+1 / D+3 / D+5 / D+7 / D+10) ──────────
+# Desenho confirmado com Ronaldo em 05/08, estendido em 25/08 (D7 e D10
+# novos, 2 etapas novas criadas no Agendor) — a régua de silêncio USA as
 # etapas que já existiam no Funil Comercial como o próprio estado, sem
 # marcador paralelo:
 #
 #   Novo Lead --(boas-vindas, já existente)--> 1º Contato (D0)  [dia da criação]
 #   1º Contato (D0)  --D+1 (1 dia corrido desde a criação)-->  nudge 1, move p/ 2° Contato
 #   2° Contato       --D+3 (3 dias corridos desde a criação)--> nudge 2, move p/ 3° Contato
-#   3° Contato       --D+5 (5 dias corridos desde a criação)--> nudge 3 (última tentativa);
+#   3° Contato       --D+5 (5 dias corridos desde a criação)--> nudge 3, move p/ 4° Contato (D5)
+#   4° Contato (D5)  --D+7 (7 dias corridos desde a criação)--> nudge 4, move p/ 5° Contato (D7)
+#   5° Contato (D7)  --D+10 (10 dias corridos desde a criação)--> nudge 5 (última tentativa);
 #                                              se NUNCA houve humano de
 #                                              verdade na conversa, fecha
-#                                              como PERDIDO - SEM CONTATO
+#                                              como PERDIDO - SEM RETORNO
 #
-#   Se o lead responder enquanto o negócio está em 2° Contato ou 3° Contato
-#   (ou seja, já tinha escalado por silêncio), move pra "Contato Retornado"
-#   — isso é feito em tempo real no webhook, não neste job.
+#   Se o lead responder enquanto o negócio está em qualquer uma das etapas
+#   de contato (2° a 5°), move pra "Contato Retornado" — isso é feito em
+#   tempo real no webhook, não neste job.
 #
 #   O Luca NUNCA move pra "Follow-up" nem "Fechamento" — isso é decisão de
 #   quem está atendendo (evolução pós-reunião, ou fechamento direto).
@@ -3824,16 +3844,17 @@ ETAPA_NOVO_LEAD      = 2835663  # Novo Lead
 ETAPA_1_CONTATO      = 3596855  # 1º Contato (D0)
 ETAPA_2_CONTATO       = 3060060  # 2° Contato
 ETAPA_3_CONTATO       = 3060061  # 3° Contato
+ETAPA_4_CONTATO_D5    = 3866010  # 4º Contato (D5) — criada 25/08, régua estendida
+ETAPA_5_CONTATO_D7    = 3866015  # 5º Contato (D7) — criada 25/08, régua estendida
 ETAPA_CONTATO_RETORNADO = 2907497  # Contato Retornado
 ORDEM_ETAPAS_FUNIL_COMERCIAL = [
     2835663,  # Novo Lead
     3596855,  # 1º Contato (D0)
     3060060,  # 2° Contato
     3060061,  # 3° Contato
-    3650939,  # Perdido - sem contato (D5) — FALTAVA aqui (confirmado 13/08, bug
-              # real: sem essa etapa na lista, "Contato Retornado" calculava a
-              # posição errada e acabava pousando exatamente nessa etapa em vez
-              # da própria — caso real: Milena, deal=44723372, 13/08 14:19 UTC)
+    3866010,  # 4º Contato (D5) — criada 25/08, régua estendida
+    3866015,  # 5º Contato (D7) — criada 25/08, régua estendida
+    3650939,  # Perdido - sem retorno (D10) — renomeada 25/08 (era "sem contato (D5)")
     2907497,  # Contato Retornado
     2845579,  # Reunião agendada
     2835665,  # Follow-up
@@ -3846,7 +3867,9 @@ ORDEM_ETAPAS_FUNIL_COMERCIAL = [
 FOLLOWUP_REGRAS = [
     (ETAPA_1_CONTATO, 1, "D1", ETAPA_2_CONTATO),
     (ETAPA_2_CONTATO,  3, "D3", ETAPA_3_CONTATO),
-    (ETAPA_3_CONTATO,  5, "D5", None),  # None = última tentativa, sem próxima etapa
+    (ETAPA_3_CONTATO,  5, "D5", ETAPA_4_CONTATO_D5),
+    (ETAPA_4_CONTATO_D5, 7, "D7", ETAPA_5_CONTATO_D7),
+    (ETAPA_5_CONTATO_D7, 10, "D10", None),  # None = última tentativa, sem próxima etapa
 ]
 FOLLOWUP_REGRA_POR_ETAPA = {r[0]: r for r in FOLLOWUP_REGRAS}
 REFORCO_D0_HORAS = 6  # horas após a criação pra mandar o reforço do mesmo dia, se ainda sem resposta
@@ -3929,7 +3952,8 @@ def mover_para_contato_retornado_se_aplicavel(phone: str):
             return
         etapa_atual_id = (deal.get("dealStage") or {}).get("id")
         if etapa_atual_id in (ETAPA_NOVO_LEAD, ETAPA_1_CONTATO, ETAPA_2_CONTATO,
-                               ETAPA_3_CONTATO, ETAPA_PERDIDO_SEM_CONTATO):
+                               ETAPA_3_CONTATO, ETAPA_4_CONTATO_D5, ETAPA_5_CONTATO_D7,
+                               ETAPA_PERDIDO_SEM_CONTATO):
             mover_etapa_funil_comercial(deal["id"], ETAPA_CONTATO_RETORNADO, permitir_recuo=True)
     except Exception as e:
         print(f"[contato_retornado] Erro phone={phone}: {e}", flush=True)
@@ -3941,8 +3965,8 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     mensagem de saída escrita por um humano de verdade (sender.type ==
     'user' E não é o próprio Luca — ver nota em humano_realmente_respondeu
     sobre send_agendorchat_message também usar sender.type=='user'), não
-    pelo Bot/automação. Decide se um lead silencioso no D+5 é elegível a
-    fechar como PERDIDO - SEM CONTATO: só é, se ninguém jamais interveio
+    pelo Bot/automação. Decide se um lead silencioso no D+10 é elegível a
+    fechar como PERDIDO - SEM RETORNO: só é, se ninguém jamais interveio
     de verdade nessa conversa.
 
     Corrigido em 19/08 (bug real, confirmado em produção): a checagem
@@ -4026,26 +4050,30 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     manda o texto completo, igual ao que está aprovado no Meta."""
     nome_template = {"D1": "followup_silencio_d1_tech",
                       "D3": "followup_silencio_d3_tech",
-                      "D5": "followup_silencio_d5_tech"}[tag]
+                      "D5": "followup_silencio_d5_tech",
+                      "D7": "followup_silencio_d7_tech",
+                      "D10": "followup_silencio_d10_tech"}[tag]
 
-    # Corrigido em 19/08 (bug real, confirmado em produção): pro D5, não
-    # existe próxima etapa "natural" pra sair automaticamente — se a
-    # mudança de etapa (mover_etapa_funil_comercial) falhar por qualquer
-    # motivo depois do envio, o negócio fica preso e a régua bate de novo
-    # dias depois, reenviando o MESMO D5 (caso real: Davisson Medeiros,
-    # D5 enviado em 14/08 e de novo em 19/08 — 5 dias de diferença). Um
-    # marcador único na própria conversa garante que o D5 NUNCA sai duas
-    # vezes, mesmo que a etapa não tenha mudado com sucesso.
-    if tag == "D5":
-        marcador_d5 = "[followup:d5_enviado]"
+    # Corrigido em 19/08 (bug real, confirmado em produção), estendido em
+    # 25/08 quando a régua ganhou D7 e D10: pra última tentativa (hoje
+    # D10, antes era D5), não existe próxima etapa "natural" pra saída
+    # automática — se a mudança de etapa (mover_etapa_funil_comercial)
+    # falhar por qualquer motivo depois do envio, o negócio fica preso e
+    # a régua bate de novo dias depois, reenviando a MESMA mensagem final
+    # (caso real: Davisson Medeiros, D5 enviado em 14/08 e de novo em
+    # 19/08 — 5 dias de diferença, na época em que D5 era a última). Um
+    # marcador único na própria conversa garante que a última tentativa
+    # NUNCA sai duas vezes, mesmo que a etapa não tenha mudado com sucesso.
+    if tag == "D10":
+        marcador_d10 = "[followup:d10_enviado]"
         try:
             msgs_existentes = mensagens_da_conversa(conversation_id)
-            if marcador_existe(msgs_existentes, marcador_d5):
-                print(f"[followup_dias] D5 já tinha sido enviado antes (marcador encontrado) "
+            if marcador_existe(msgs_existentes, marcador_d10):
+                print(f"[followup_dias] D10 já tinha sido enviado antes (marcador encontrado) "
                       f"conv={conversation_id} deal={deal_id} — não reenvia", flush=True)
                 return False
         except Exception as e:
-            print(f"[followup_dias] Erro ao checar marcador D5 conv={conversation_id}: {e}", flush=True)
+            print(f"[followup_dias] Erro ao checar marcador D10 conv={conversation_id}: {e}", flush=True)
 
     tpl = template_por_nome(nome_template)
     if not tpl:
@@ -4064,17 +4092,85 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
                f"sem tempo para continuar antes. Caso já possua CNPJ, cada mês sem o enquadramento "
                f"certo é imposto pago a mais, sem precisar. Se deseja abrir, já podemos começar do "
                f"jeito certo.\n\nQual o melhor momento para falarmos?"),
-        "D5": ("Já vou indo por aqui, mas antes pega essas dicas:\n\nO CNAE certo é a diferença "
-               "entre 15,5% ou 6% de imposto: https://lucralize.com.br/cnae-dev/\n\nQuanto você "
-               "pagaria de imposto? https://lucralize.com.br/calculadora-dev/\n\nEssa é minha "
-               "última mensagem. Se fizer sentido economizar, me chama quando quiser."),
+        "D5": (f"Oi, {nome_saudacao}, sabia que o CNAE certo é a diferença entre pagar 15,5% ou 6% "
+               f"de imposto?\n\nSeparei algo que pode te ajudar. Confere aqui: "
+               f"https://lucralize.com.br/cnae-dev/\n\nDepois de ver, me conta o que achou e te "
+               f"ajudo a entender o que faz sentido pro seu caso."),
+        "D7": (f"Já que vimos como o CNAE certo importa, {nome_saudacao}, que tal descobrir quanto "
+               f"isso representa no seu bolso?\n\nCalculadora rápida aqui: "
+               f"https://lucralize.com.br/calculadora-dev/\n\nSe o número te surpreender (é comum "
+               f"surpreender!), me chama que a gente resolve isso juntos."),
+        "D10": (f"Já vou indo por aqui, {nome_saudacao}, mas antes recapitulando as duas ferramentas "
+                f"que te mandei:\n\nCNAE certo: https://lucralize.com.br/cnae-dev/\nQuanto você "
+                f"pagaria: https://lucralize.com.br/calculadora-dev/\n\nEssa é minha última "
+                f"mensagem. Se fizer sentido economizar, responde só um \"sim\" que eu retomo "
+                f"com você."),
     }[tag]
     enviar_template_conversa(conversation_id, tpl, {"1": nome_saudacao}, texto_completo)
-    marcador_nota = " [followup:d5_enviado]" if tag == "D5" else ""
+    marcador_nota = " [followup:d10_enviado]" if tag == "D10" else ""
     send_private_note(conversation_id, f"🔁 Follow-up {tag} enviado ao lead via template.{marcador_nota}")
     espelho_crm(deal_id, f"🤖 Follow-up automático ({tag}) enviado ao lead — silêncio de {tag[1:]} dia(s).")
     print(f"[followup_dias] ✅ {tag} enviado conv={conversation_id} deal={deal_id}", flush=True)
     return True
+
+
+def dias_desde_referencia(deal_fresco: dict, etapa_atual_id: int, conversation_id: int, deal_id: int):
+    """Retorna quantos dias completos se passaram desde a referência
+    correta pra contar a régua de silêncio nesta etapa.
+
+    Normalmente é a CRIAÇÃO do negócio (startTime) — decisão confirmada
+    com Ronaldo em 05/08. Mas se a entrada na etapa atual NÃO veio da
+    progressão normal do próprio robô (marcador [followup:etapa_normal:
+    {id}] ausente na conversa), é sinal de que o negócio foi movido
+    manualmente de volta pra essa etapa (ex: respondeu depois de
+    'Contato Retornado', e Ronaldo trouxe de volta pra '3° Contato' pra
+    reativar a régua) — criado 25/08, a pedido de Ronaldo. Nesse caso, o
+    relógio reinicia a partir de AGORA (a primeira vez que o robô nota a
+    entrada manual), guardando um marcador
+    [followup:regua_reiniciada:{timestamp}] pra usar o mesmo ponto de
+    partida em passagens futuras, sem reiniciar de novo a cada varredura.
+
+    Retorna None se não for possível calcular (sem startTime, por ex.)."""
+    marcador_normal = f"[followup:etapa_normal:{etapa_atual_id}]"
+    try:
+        msgs = mensagens_da_conversa(conversation_id)
+    except Exception as e:
+        print(f"[followup_dias] Erro ao ler conversa pra checar reset deal={deal_id}: {e}", flush=True)
+        msgs = None
+
+    entrada_normal = True if msgs is None else marcador_existe(msgs, marcador_normal)
+
+    if entrada_normal or etapa_atual_id == ETAPA_1_CONTATO:
+        start_time = deal_fresco.get("startTime")
+        if not start_time:
+            return None
+        try:
+            criado_em = datetime.strptime(start_time[:10], "%Y-%m-%d")
+        except Exception:
+            return None
+        return (datetime.utcnow() - criado_em).days
+
+    # Entrada manual detectada — procura marcador de reset já existente
+    marcador_reset_prefix = "[followup:regua_reiniciada:"
+    if msgs:
+        for m in msgs:
+            content = m.get("content") or ""
+            if marcador_reset_prefix in content:
+                try:
+                    ts_str = content.split(marcador_reset_prefix)[1].split("]")[0]
+                    reset_em = datetime.utcfromtimestamp(float(ts_str))
+                    return (datetime.utcnow() - reset_em).days
+                except Exception:
+                    continue  # marcador corrompido, tenta o próximo
+
+    # Nenhum marcador de reset ainda — cria um agora, dia 0
+    try:
+        send_private_note(conversation_id, (
+            f"🔁 Retorno manual detectado nesta etapa — reiniciando a contagem de dias "
+            f"da régua de silêncio a partir de agora. {marcador_reset_prefix}{time.time()}]"))
+    except Exception as e:
+        print(f"[followup_dias] Erro ao criar marcador de reset deal={deal_id}: {e}", flush=True)
+    return 0
 
 
 def verificar_followup_dias_silencio():
@@ -4161,25 +4257,6 @@ def verificar_followup_dias_silencio():
 
         _, dias_limite, tag, proxima_etapa = regra
 
-        # Relógio contado a partir da CRIAÇÃO do negócio (startTime), não do
-        # silêncio do lead — confirmado com Ronaldo em 05/08. Ex.: criado
-        # segunda 03/08 -> D+1 dispara terça 04/08, D+3 dispara quinta 06/08
-        # (dias corridos simples a partir da criação).
-        start_time = deal_fresco.get("startTime")
-        if not start_time:
-            print(f"[followup_dias] Pulado — sem startTime deal={deal_id}", flush=True)
-            continue
-        try:
-            criado_em = datetime.strptime(start_time[:10], "%Y-%m-%d")
-        except Exception:
-            print(f"[followup_dias] Pulado — startTime inválido deal={deal_id} valor={start_time}", flush=True)
-            continue
-        dias_desde_criacao = (datetime.utcnow() - criado_em).days
-        if dias_desde_criacao < dias_limite:
-            print(f"[followup_dias] Pulado — ainda não atingiu {dias_limite}d "
-                  f"(tem {dias_desde_criacao}d) deal={deal_id} etapa={etapa_atual_id}", flush=True)
-            continue
-
         person = deal_fresco.get("person") or {}
         person_id = person.get("id")
         nome = (person.get("name") or "").strip().split(" ")[0] if person.get("name") else ""
@@ -4196,6 +4273,22 @@ def verificar_followup_dias_silencio():
                 print(f"[followup_dias] Pulado — conversa não encontrada deal={deal_id}", flush=True)
                 continue
             conversation_id = conv.get("id")
+
+            # Relógio contado a partir da CRIAÇÃO do negócio (startTime), não
+            # do silêncio do lead — confirmado com Ronaldo em 05/08. Ex.:
+            # criado segunda 03/08 -> D+1 dispara terça 04/08. EXCETO se a
+            # entrada na etapa atual foi um retorno manual (Ronaldo movendo
+            # de volta), caso em que o relógio reinicia a partir de agora —
+            # ver dias_desde_referencia (25/08).
+            dias_desde_criacao = dias_desde_referencia(deal_fresco, etapa_atual_id, conversation_id, deal_id)
+            if dias_desde_criacao is None:
+                print(f"[followup_dias] Pulado — sem startTime deal={deal_id}", flush=True)
+                continue
+            if dias_desde_criacao < dias_limite:
+                print(f"[followup_dias] Pulado — ainda não atingiu {dias_limite}d "
+                      f"(tem {dias_desde_criacao}d) deal={deal_id} etapa={etapa_atual_id}", flush=True)
+                continue
+
             # Não exige conv.status == "open": muitas conversas ficam
             # "resolved" no AgendorChat por inatividade, mesmo o negócio
             # continuando ativo — isso não significa que o lead terminou,
@@ -4217,25 +4310,30 @@ def verificar_followup_dias_silencio():
             resolver_conversa_agendorchat(conversation_id)
 
             if proxima_etapa:
-                mover_etapa_funil_comercial(deal_id, proxima_etapa)
+                if mover_etapa_funil_comercial(deal_id, proxima_etapa):
+                    # Marca essa entrada como progressão NORMAL do robô — usado
+                    # por dias_desde_referencia (25/08) pra distinguir de um
+                    # retorno manual, que deveria reiniciar o relógio.
+                    send_private_note(conversation_id,
+                        f"🔁 Régua avançou automaticamente para esta etapa. [followup:etapa_normal:{proxima_etapa}]")
             else:
-                # D+5 na 3° Contato — última tentativa esgotada
+                # D+10 na 5° Contato (D7) — última tentativa esgotada
                 if not humano_ja_atendeu_alguma_vez(conversation_id):
                     if marcar_perdido_sem_contato(deal_id):
                         send_private_note(conversation_id,
-                            "🔁 Follow-up D5 esgotado, sem intervenção humana em nenhum momento "
-                            "— negócio marcado PERDIDO - SEM CONTATO.")
+                            "🔁 Follow-up D10 esgotado, sem intervenção humana em nenhum momento "
+                            "— negócio marcado PERDIDO - SEM RETORNO.")
                 else:
                     # Já teve contato humano em algum momento, mas não fechou —
                     # move pra "Perdido" genérica (não "sem contato", porque
                     # teve contato sim). Evita também que o negócio fique
-                    # parado em 3º Contato pra sempre, batendo a mesma regra
-                    # D5 de novo na próxima rodada (decisão de Ronaldo, 13/08).
+                    # parado em 5º Contato pra sempre, batendo a mesma regra
+                    # D10 de novo na próxima rodada (decisão de Ronaldo, 13/08).
                     if mover_etapa_funil_comercial(deal_id, ETAPA_PERDIDO_GENERICO):
                         send_private_note(conversation_id,
-                            "🔁 Follow-up D5 esgotado. Já teve contato humano em algum momento, "
+                            "🔁 Follow-up D10 esgotado. Já teve contato humano em algum momento, "
                             "mas não fechou — negócio marcado PERDIDO (genérico).")
-                    print(f"[followup_dias] D5 enviado, humano já interveio — movido pra "
+                    print(f"[followup_dias] D10 enviado, humano já interveio — movido pra "
                           f"Perdido genérico, deal={deal_id}", flush=True)
 
         except Exception as e:
