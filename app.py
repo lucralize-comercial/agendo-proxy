@@ -158,6 +158,15 @@ LUCA_SEND_TOKEN        = os.environ.get("LUCA_SEND_TOKEN", "") or AGENDORCHAT_TO
 AGENDORCHAT_ACCOUNT_ID = os.environ.get("AGENDORCHAT_ACCOUNT_ID", "1035")
 AGENDORCHAT_BASE       = "https://chat.agendor.com.br/api/v1"
 
+# Criado 27/08 (Ronaldo): agora existem dois WhatsApp conectados no
+# AgendorChat — o inbox comercial (2367, onde o Luca atua normalmente) e
+# um segundo, conectado via canal "Connector" pra teste, no qual o Luca
+# NUNCA deve interagir. Lista separada por vírgula via env var, caso mais
+# inboxes precisem ser excluídos no futuro.
+INBOXES_IGNORADOS = {
+    int(i.strip()) for i in os.environ.get("INBOXES_IGNORADOS", "2283").split(",") if i.strip()
+}
+
 
 LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Ronaldo Cassimiro")  # nome real da conta que o bot usa pra enviar
 LUCA_BOT_NOME_EXIBICAO = os.environ.get("LUCA_BOT_NOME_EXIBICAO", "Luca")  # available_name configurado nessa conta
@@ -2368,6 +2377,15 @@ def agendorchat_webhook():
         print(f"[webhook] RAW event={event} | message_type={message_type} | sender_type={sender_type}", flush=True)
         print(f"[webhook] RAW payload={json.dumps(body)[:600]}", flush=True)
 
+        # ── Inbox excluído (27/08): Luca nunca interage com este número ──────
+        inbox_id_raw = (body.get("conversation") or {}).get("contact_inbox", {}).get("inbox_id")
+        try:
+            if inbox_id_raw is not None and int(inbox_id_raw) in INBOXES_IGNORADOS:
+                print(f"[webhook] IGNORADO — inbox excluído ({inbox_id_raw})", flush=True)
+                return jsonify({}), 200
+        except (TypeError, ValueError):
+            pass
+
         # ── message_updated: status real de entrega (20/08, novo) ──────────
         # Confirmado com o suporte do Agendor: o payload desse evento NÃO
         # traz o status em si, só avisa "essa mensagem mudou" — é preciso
@@ -2788,6 +2806,16 @@ def tentar_retomar_conversa(conversation_id: int, origem: str = "conv_updated") 
         inbox_identifier = contact_inbox.get("source_id", "")
         contact_identifier = contact_inbox.get("pubsub_token", "")
 
+        # Rede de segurança (27/08): confirma de novo com dado fresco, caso o
+        # payload do webhook que chamou esta função não tivesse o inbox_id.
+        inbox_id_fresco = contact_inbox.get("inbox_id") or detalhe.get("inbox_id")
+        try:
+            if inbox_id_fresco is not None and int(inbox_id_fresco) in INBOXES_IGNORADOS:
+                print(f"[retomada:{origem}] IGNORADO — inbox excluído ({inbox_id_fresco}) conv={conversation_id}", flush=True)
+                return False
+        except (TypeError, ValueError):
+            pass
+
         if conv_key not in conversation_histories:
             # Não existe entrada anterior nesta memória do processo — não há
             # nada de "conv" pra preservar aqui (diferente do reset por
@@ -2894,6 +2922,15 @@ def agendorchat_conversation_updated():
 
         if not conversation_id:
             return jsonify({}), 200
+
+        # ── Inbox excluído (27/08): mesma exclusão do webhook principal ──────
+        inbox_id_raw = (conversation.get("contact_inbox") or {}).get("inbox_id") or conversation.get("inbox_id")
+        try:
+            if inbox_id_raw is not None and int(inbox_id_raw) in INBOXES_IGNORADOS:
+                print(f"[conv_updated] IGNORADO — inbox excluído ({inbox_id_raw})", flush=True)
+                return jsonify({}), 200
+        except (TypeError, ValueError):
+            pass
 
         print(f"[conv_updated] conv={conversation_id} | status={status} | assignee={assignee}", flush=True)
 
