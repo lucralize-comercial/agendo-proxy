@@ -2485,14 +2485,39 @@ def agendorchat_webhook():
                         if ultima_incoming:
                             criada = ultima_incoming.get("created_at") or 0
                             conversa_ativa_agora = (time.time() - float(criada)) < 600  # 10 min
-                        if conversa_ativa_agora:
+
+                        # Corrigido 31/08 (bug real, caso fsantoslima825): a
+                        # checagem acima só via "é recente?", sem checar se o
+                        # Luca já tinha respondido ALGUMA coisa de verdade
+                        # antes. Se essa saudação atrasada cai bem na
+                        # PRIMEIRA mensagem do lead (ainda dentro do delay de
+                        # 90s antes do Luca responder pela 1ª vez), dizer
+                        # "continue com sua última pergunta" não faz sentido
+                        # — não existe conversa em andamento ainda pra
+                        # continuar, e a pessoa fica sem resposta nenhuma até
+                        # o Luca responder de verdade. Nesse caso, usa um
+                        # texto que só confirma o recebimento, sem sugerir
+                        # que já tinha algo rolando.
+                        ja_teve_resposta_real_do_luca = any(
+                            m.get("message_type") == 1 and not m.get("private")
+                            and not (m.get("additional_attributes") or {}).get("automation_id")
+                            for m in msgs_previas
+                        )
+
+                        if conversa_ativa_agora and ja_teve_resposta_real_do_luca:
                             send_agendorchat_message(conv_id_saudacao, (
                                 "Oi de novo! Essa mensagem acima foi automática (nosso "
                                 "sistema atrasou pra registrar seu contato) — já estamos "
                                 "conversando, pode ignorar. Segue com sua última pergunta "
                                 "que eu te ajudo!"))
-                            print(f"[webhook] Saudação atrasada detectada, esclarecimento "
+                            print(f"[webhook] Saudação atrasada (meio de conversa), esclarecimento "
                                   f"enviado conv={conv_id_saudacao}", flush=True)
+                        elif conversa_ativa_agora:
+                            send_agendorchat_message(conv_id_saudacao, (
+                                "Oi de novo! A mensagem acima foi automática — recebi sua "
+                                "pergunta certinho, só um instante que já te respondo!"))
+                            print(f"[webhook] Saudação atrasada (1º contato, sem resposta real "
+                                  f"ainda), esclarecimento enviado conv={conv_id_saudacao}", flush=True)
                     except Exception as e:
                         print(f"[webhook] Erro ao checar saudação atrasada conv={conv_id_saudacao}: {e}", flush=True)
 
