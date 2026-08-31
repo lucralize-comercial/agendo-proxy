@@ -646,6 +646,11 @@ fetch_started_at = None
 history_running = False
 
 def fetch_page(page):
+    """Corrigido 27/08 (revisão externa, ponto 8): trocado o backoff fixo
+    (5s sempre) pelo exponencial (2s, 4s, 8s) — mesmo padrão já usado com
+    sucesso em fetch_tasks_job pros 429 do Agendor. Uma espera fixa curta
+    demais não dá tempo da janela de limite de taxa da API resetar,
+    fazendo a 2ª e 3ª tentativa falharem pelo mesmo motivo da 1ª."""
     for attempt in range(3):
         try:
             r = requests.get(
@@ -658,7 +663,8 @@ def fetch_page(page):
         except Exception as e:
             print(f"Tentativa {attempt+1}/3 falhou na pagina {page}: {e}", flush=True)
             if attempt < 2:
-                time.sleep(5)
+                espera = 2 ** (attempt + 1)  # 2s, 4s
+                time.sleep(espera)
     return None
 
 
@@ -668,7 +674,10 @@ def buscar_deal_fresco(deal_id):
     devolvendo corpo vazio e um erro confuso de JSON ('Expecting value')
     em vez de um 429 claro. Usada em vários pontos que precisam da etapa
     fresca antes de mover (corrigido 14/08, ~22 negócios pulados por
-    rodada só por causa desse erro silencioso)."""
+    rodada só por causa desse erro silencioso).
+
+    Corrigido 27/08 (revisão externa, ponto 8): backoff exponencial em
+    vez de fixo em 3s, mesmo padrão das outras funções de retry."""
     for attempt in range(3):
         try:
             r = requests.get(f"{AGENDOR_BASE}/deals/{deal_id}", headers=HEADERS, timeout=15)
@@ -679,7 +688,7 @@ def buscar_deal_fresco(deal_id):
         except Exception as e:
             print(f"[buscar_deal_fresco] Tentativa {attempt+1}/3 falhou deal={deal_id}: {e}", flush=True)
             if attempt < 2:
-                time.sleep(3)
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s
     return {}
 
 def fetch_deal_history(deal_id):
@@ -1781,7 +1790,10 @@ def get_conversation_details(conversation_id: int) -> dict:
 
     Corrigido 20/08: sem proteção contra falha temporária (ex: 502 do
     lado do AgendorChat), confirmado em produção causando erro em
-    cascata em lembretes e follow-ups."""
+    cascata em lembretes e follow-ups.
+
+    Corrigido 27/08 (revisão externa, ponto 8): trocado o backoff fixo
+    (3s sempre) pelo exponencial (2s, 4s), mesmo raciocínio do fetch_page."""
     url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}"
     for attempt in range(3):
         try:
@@ -1795,7 +1807,7 @@ def get_conversation_details(conversation_id: int) -> dict:
         except Exception as e:
             print(f"[conv_details] Tentativa {attempt+1}/3 falhou conv={conversation_id}: {e}", flush=True)
             if attempt < 2:
-                time.sleep(3)
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s
     return {}
 
 
@@ -2433,7 +2445,7 @@ def agendorchat_webhook():
                         mover_etapa_funil_comercial(deal["id"], ETAPA_PERDIDO_SEM_CONTATO, permitir_recuo=True)
                         send_private_note(conversation_id,
                             f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
-                            f"Movido para 'Perdido - sem contato (D5)' para verificação manual. {marcador_falha}")
+                            f"Movido para 'Perdido - sem retorno (D10)' para verificação manual. {marcador_falha}")
                     else:
                         send_private_note(conversation_id,
                             f"⚠️ Mensagem não entregue (número inválido/sem WhatsApp). Motivo: {motivo}. "
@@ -3184,7 +3196,7 @@ def conversa_do_telefone(phone):
             print(f"[lembrete] Tentativa {attempt+1}/3 falhou ao localizar conversa "
                   f"de {phone}: {e}", flush=True)
             if attempt < 2:
-                time.sleep(3)
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s — corrigido 27/08, era fixo em 3s
     return None
 
 
@@ -3231,7 +3243,21 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     conta do Ronaldo COM a marca é o próprio Luca (exclui); uma mensagem
     da MESMA conta SEM a marca é o Ronaldo digitando de verdade (conta
     como humano). Pra qualquer outra conta (ex: dono padrão do CRM), a
-    exclusão continua sendo total, já que o Luca nunca envia por ela."""
+    exclusão continua sendo total, já que o Luca nunca envia por ela.
+
+    Corrigido em 27/08 (bug crítico, achado por revisão externa da
+    documentação, nunca confirmado em produção mas plausível pelo código):
+    a régua D1/D3/D5/D7/D10 e os lembretes de reunião são enviados via
+    enviar_template_conversa, NÃO via send_agendorchat_message — logo
+    NUNCA levam LUCA_MARKER (não dá pra adicionar caractere a um template
+    aprovado sem quebrar o conteúdo aprovado pela Meta). Sem essa
+    distinção, TODO envio de template pela conta do Luca era lido como
+    'Ronaldo escreveu manualmente', fazendo humano_realmente_respondeu
+    retornar True logo depois de qualquer follow-up automático ser
+    enviado — o que faria o Luca se calar sozinho, ou o D10 classificar
+    negócios sem contato real como 'já teve contato humano'. Agora,
+    mensagem da conta do Luca com template_params (havendo marca ou não)
+    também conta como o próprio bot, não como humano."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
@@ -3245,8 +3271,9 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
                 nome_sender = (sender.get("name") or "").strip().lower()
                 eh_conta_do_luca = nome_sender == LUCA_BOT_NOME_REAL.strip().lower()
                 if eh_conta_do_luca:
-                    # Mesma conta do bot: só é de verdade o Luca se tiver a marca.
-                    if LUCA_MARKER not in (m.get("content") or ""):
+                    tem_marca = LUCA_MARKER in (m.get("content") or "")
+                    eh_template = bool((m.get("additional_attributes") or {}).get("template_params"))
+                    if not tem_marca and not eh_template:
                         return True  # Ronaldo escreveu manualmente por essa conta
                     continue
                 if not eh_assignee_bot(sender):
@@ -3270,7 +3297,13 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
     sem limite de tempo). Agora dá pra dar ao humano uma janela de espera
     (1h) antes do Luca retomar — e a checagem não depende mais de haver
     alguém atribuído, só de quando foi a última mensagem humana de
-    verdade, seja quem for."""
+    verdade, seja quem for.
+
+    Corrigido em 27/08: mesmo bug crítico do template sem marca (ver nota
+    em humano_realmente_respondeu) — sem essa correção, todo envio de
+    D1/D3/D5/D7/D10 ou lembrete de reunião via template reiniciava esse
+    relógio pra 'zero segundos', fazendo o Luca achar que um humano
+    tinha acabado de escrever."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
@@ -3285,7 +3318,9 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
                 nome_sender = (sender.get("name") or "").strip().lower()
                 eh_conta_do_luca = nome_sender == LUCA_BOT_NOME_REAL.strip().lower()
                 if eh_conta_do_luca:
-                    if LUCA_MARKER not in (m.get("content") or ""):
+                    tem_marca = LUCA_MARKER in (m.get("content") or "")
+                    eh_template = bool((m.get("additional_attributes") or {}).get("template_params"))
+                    if not tem_marca and not eh_template:
                         ultima_humana_em = m.get("created_at") or ultima_humana_em
                     continue
                 if not eh_assignee_bot(sender):
@@ -3777,6 +3812,24 @@ def verificar_followup_1h_silencio():
         texto = (f"Oi, {primeiro_nome}.\nVocê ainda está por aí?") if primeiro_nome else \
                 ("Oi!\nVocê ainda está por aí?")
 
+        # Corrigido 27/08 (achado da revisão externa): esse texto é livre,
+        # não template — só funciona dentro da janela de 24h desde a
+        # última mensagem do lead. Checar ANTES de mandar, em vez de só
+        # reagir à falha depois (message_updated), evita a tentativa
+        # inútil e já avisa pra contato manual na hora certa.
+        try:
+            msgs_janela = mensagens_da_conversa(conversation_id)
+        except Exception as e:
+            print(f"[followup1h] Erro ao checar janela conv={conversation_id}: {e}", flush=True)
+            msgs_janela = None
+        if msgs_janela is not None and not janela_aberta(msgs_janela):
+            send_private_note(conversation_id, (
+                f"🔔 Follow-up de 1h NÃO enviado — janela de 24h do WhatsApp fechada. "
+                f"Recomenda-se contato manual com {primeiro_nome or 'o lead'}."))
+            conv["followup_1h_enviado"] = True  # evita tentar de novo a cada 15 min
+            print(f"[followup1h] Pulado — janela de 24h fechada conv={conversation_id}", flush=True)
+            continue
+
         try:
             send_agendorchat_message(conversation_id, texto)
             conv["followup_1h_enviado"] = True
@@ -3833,6 +3886,20 @@ def verificar_followup_4h_silencio_humano():
         texto = (f"{primeiro_nome}, acho que peguei você num momento ruim. "
                  f"Qual o melhor horário pra gente conversar?") if primeiro_nome else \
                 ("Acho que peguei você num momento ruim. Qual o melhor horário pra gente conversar?")
+
+        # Mesma checagem preventiva de janela do followup1h (27/08).
+        try:
+            msgs_janela = mensagens_da_conversa(conversation_id)
+        except Exception as e:
+            print(f"[followup4h] Erro ao checar janela conv={conversation_id}: {e}", flush=True)
+            msgs_janela = None
+        if msgs_janela is not None and not janela_aberta(msgs_janela):
+            send_private_note(conversation_id, (
+                f"🔔 Follow-up de 4h NÃO enviado — janela de 24h do WhatsApp fechada. "
+                f"Recomenda-se contato manual com {primeiro_nome or 'o lead'}."))
+            conv["followup_humano_enviado"] = True
+            print(f"[followup4h] Pulado — janela de 24h fechada conv={conversation_id}", flush=True)
+            continue
 
         try:
             send_agendorchat_message(conversation_id, texto)
