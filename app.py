@@ -3337,10 +3337,21 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     enviado — o que faria o Luca se calar sozinho, ou o D10 classificar
     negócios sem contato real como 'já teve contato humano'. Agora,
     mensagem da conta do Luca com template_params (havendo marca ou não)
-    também conta como o próprio bot, não como humano."""
+    também conta como o próprio bot, não como humano.
+
+    Corrigido em 01/09 (bug real, caso Lucas: D1 enviado às 10:26, conta
+    do Ronaldo/Luca 'concluiu o atendimento' logo em seguida — esse
+    evento de resolução aparentemente gera um registro na conversa sem
+    conteúdo de texto, sem marca e sem template_params, e por isso
+    passava pelos dois filtros acima como se fosse o Ronaldo escrevendo
+    de verdade. Resultado: o Luca ficou 1h+ sem responder o Lucas mesmo
+    ele reengajando com 'Oi, pode mostrar' depois do D1). Mensagem sem
+    conteúdo nenhum nunca conta como intervenção humana — não tem o que
+    ter sido "escrito" ali."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
+                   and (m.get("content") or "").strip()
                    and not (m.get("additional_attributes") or {}).get("automation_id")
                    and "Em breve um de nossos consultores dará andamento" not in (m.get("content") or "")]
         for m in dialogo:
@@ -3383,10 +3394,15 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
     em humano_realmente_respondeu) — sem essa correção, todo envio de
     D1/D3/D5/D7/D10 ou lembrete de reunião via template reiniciava esse
     relógio pra 'zero segundos', fazendo o Luca achar que um humano
-    tinha acabado de escrever."""
+    tinha acabado de escrever.
+
+    Corrigido em 01/09: mesmo bug do conteúdo vazio (ver nota em
+    humano_realmente_respondeu, caso Lucas) — evento de resolução de
+    atendimento sem texto nenhum não conta como intervenção humana."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
         dialogo = [m for m in msgs if m.get("message_type") in (0, 1, 3) and not m.get("private")
+                   and (m.get("content") or "").strip()
                    and not (m.get("additional_attributes") or {}).get("automation_id")
                    and "Em breve um de nossos consultores dará andamento" not in (m.get("content") or "")]
         ultima_humana_em = None
@@ -4171,7 +4187,7 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     try:
         msgs = mensagens_da_conversa(conversation_id)
         for m in msgs:
-            if m.get("message_type") == 1 and not m.get("private"):
+            if m.get("message_type") == 1 and not m.get("private") and (m.get("content") or "").strip():
                 sender = m.get("sender") or {}
                 if sender.get("type") != "user":
                     continue
