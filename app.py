@@ -2563,7 +2563,12 @@ def agendorchat_webhook():
                 eh_mensagem_do_bot = eh_conta_do_luca and LUCA_MARKER in content_out
                 eh_generico_ou_automatico = (sender_out.get("type") != "user" or automation_id_out
                                               or template_params_out or eh_assignee_bot(sender_out))
-                if not eh_mensagem_do_bot and not eh_generico_ou_automatico:
+                # Corrigido 01/09 (bug real, caso Gabriel): content vazio/null
+                # geralmente é reação de emoji ou atualização de status, não
+                # uma mensagem de verdade — sem esse guard, o classificador
+                # recebia string vazia e (por segurança, no erro) tendia a
+                # dizer "precisa de resposta", ligando o timer de 4h à toa.
+                if not eh_mensagem_do_bot and not eh_generico_ou_automatico and content_out.strip():
                     conv_id_humano = (body.get("conversation") or {}).get("id")
                     if conv_id_humano and mensagem_precisa_resposta(content_out):
                         conv_key_humano = str(conv_id_humano)
