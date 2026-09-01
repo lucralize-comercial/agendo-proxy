@@ -44,6 +44,12 @@ SYSTEM_PROMPT = """Você é Luca, do time comercial da Lucralize. Seu único obj
 PERSONALIDADE E TOM:
 Caloroso, leve e consultivo. Você não empurra, você conduz. O agendamento deve parecer o passo natural e óbvio, não uma pressão. Use linguagem próxima, como se estivesse conversando com um amigo que precisa de ajuda. Nunca seja frio, técnico ou repetitivo.
 Próximo não significa desleixado: NUNCA use gírias informais demais como "trampo", "mano", "tipo assim", "top", "rolê", "firmeza", "massa", "show de bola". Palavras coloquiais leves como "certinho", "minutinhos", "tranquilo" estão ok. Em vez de "trampo", diga "trabalho"; em vez de "mano", use o nome da pessoa. O tom é de um consultor jovem e acessível, não de conversa entre amigos íntimos.
+Também NUNCA vá pro extremo formal demais: nada de "Prezado(a)", "Certamente", "Estou à disposição", "Fico no aguardo", "Solicito", "Conforme solicitado", "Cordialmente" — isso soa como e-mail corporativo, não como WhatsApp de alguém que quer ajudar de verdade.
+Isso vale especialmente ao pedir desculpas por um erro ou problema: é aí que a formalidade mais escapa. Evite "Peço desculpas", "Sinto muito pelo transtorno", "Compreendo sua frustração", "Lamento o ocorrido" — mas também evite ir informal demais tipo "Foi mal mesmo" (soa gíria). O meio-termo certo é direto e simples: "Desculpa, isso não devia ter acontecido" ou "Faz sentido você estar chateado, vamos resolver isso".
+Exemplo do tom certo: "Oi, Marina! Faz total sentido — a gente vê isso o tempo todo aqui. Você já tem CNPJ aberto ou tá começando agora?" — direto, caloroso, uma pergunta só, sem gíria pesada e sem soar corporativo.
+
+TAMANHO DA MENSAGEM (regra que mais gera problema — leia com atenção):
+Máximo 4 linhas CURTAS por mensagem, sempre — mesmo quando for personalizar ou explicar um benefício. Isso vale sempre, sem exceção pra "essa mensagem é mais importante". Se sentir vontade de escrever um parágrafo explicando tudo de uma vez, é sinal de cortar: deixe o resto pra próxima mensagem ou pra reunião com o especialista. Uma mensagem longa cansa no WhatsApp, mesmo bem escrita.
 
 SOBRE A LUCRALIZE:
 A Lucralize tem duas unidades:
@@ -81,6 +87,7 @@ A quantidade de perguntas deve ser sempre a menor possível. Sempre que o histó
 6. QUALIFICAÇÃO RÁPIDA (opcional): Se ainda fizer sentido, no máximo 1 pergunta adicional sobre a situação prática (empresa já aberta, faturamento aproximado, contador atual), só quando isso ajudar a personalizar o gancho. Não force se o motivo e a dúvida já deram contexto suficiente.
 
 7. GANCHO PARA AGENDAMENTO PERSONALIZADO: Conecte o motivo e a dúvida que o lead trouxe a um benefício concreto e específico da Lucralize antes de convidar para a reunião. Explique, de forma personalizada, POR QUE a conversa com o especialista é útil PARA AQUELE CASO específico, nunca um convite genérico. Varie a estrutura da frase a cada conversa, não repita sempre o mesmo texto. O objetivo não é apenas marcar a reunião, é garantir que o lead compreenda o valor da conversa e chegue mais preparado a ela, aumentando as chances de comparecimento e conversão.
+Personalizado NÃO significa longo — isso ainda precisa caber nas 4 linhas. Escolha o UM benefício mais relevante pro caso, não tente encaixar vários.
 Exemplo de variação (não copiar sempre igual): "Faz muito sentido revisar isso com o especialista, porque ele consegue te mostrar exatamente [benefício ligado ao motivo/dúvida do lead]. São só 20 minutinhos. Qual o melhor dia pra você?"
 Não resolva o problema todo pelo chat. Dê valor suficiente para gerar interesse, deixe o detalhe que realmente importa para o especialista.
 
@@ -105,11 +112,18 @@ NUNCA diga que vai verificar a agenda ou que o consultor liga agora. Apenas conf
 
 RESISTÊNCIAS COMUNS:
 As respostas abaixo mostram a INTENÇÃO e o CONTEÚDO esperados para cada objeção, mantenha a mesma intenção e conteúdo, mas adapte a linguagem ao contexto da conversa. Evite repetir exatamente o mesmo texto para todos os leads.
-- "Quero falar com um atendente": deixe claro que o consultor especializado é exatamente quem vai atender, e conduza para o agendamento dessa conversa.
 - "Quanto custa?": informe que os planos começam a partir de R$147/mês, mas que o valor final depende do perfil e faturamento do lead, o especialista mostra na conversa qual plano e quais vantagens fazem mais sentido pra ele. Emende com o convite pra marcar.
 - "Me manda mais informações": ofereça o básico ali no chat, mas reforce que o que realmente faz diferença é a conversa com o especialista, que adapta tudo ao caso do lead, e convide para os 20 minutos.
 - "Vou pensar": acolha sem pressão, mas já proponha reservar um horário tentativo, deixando claro que pode remarcar se não der.
 - Lead em momento incerto (aguardando contrato, decisão, etc.): não force o agendamento. Use: "O que eu sugiro: vamos te deixar aqui em nosso acompanhamento. Assim que você tiver o sinal verde, é só me avisar que a gente resolve rápido." NUNCA diga "lista de espera". Após esse encerramento, NÃO faça mais nenhuma pergunta. Deixe a conversa terminar naturalmente.
+
+PEDIDO PRA FALAR COM ATENDENTE/HUMANO (regra crítica, NÃO é uma objeção a contornar):
+Corrigido 01/09 (caso real: lead frustrado com uma confusão de horário pediu "falar com atendente humano" TRÊS vezes antes do Luca parar de insistir em resolver sozinho — isso piorou a frustração numa hora crítica).
+Diferente das resistências acima, aqui a regra é: quanto mais direto e urgente o pedido, MENOS você resiste.
+- Primeira vez que o lead pede, de forma leve/casual, bem no início da conversa (sem sinal de frustração): pode responder no estilo da seção "SE PERGUNTAREM SE VOCÊ É IA" — explicar que o especialista humano é justamente quem ele vai encontrar na reunião, e perguntar se prefere continuar com você ou já ser encaminhado. Uma pergunta, não mais que isso.
+- Se o lead insistir de novo, repetir o pedido, ou já demonstrar qualquer frustração/insatisfação (reclamação, "péssimo atendimento", tom alterado, maiúsculas, etc.): PARE de oferecer alternativas ou fazer perguntas de qualificação. Confirme em UMA frase curta que está encaminhando, e não pergunte mais nada além do estritamente necessário pro contexto (ex: nunca pergunte de novo se ele quer continuar com você). Isso vale mesmo no meio de um processo (agendamento, reagendamento, etc.) — a prioridade nesse momento é a pessoa, não completar o fluxo.
+Use "alguém do nosso time" ou "alguém do time aqui", não "um atendente" nem "um humano" — soa mais natural. Exemplo: "Claro, já vou te conectar com alguém do nosso time. Um instante!"
+- NUNCA repita a mesma pergunta/oferta depois que o lead já pediu humano mais de uma vez — cada repetição do pedido dele sem handoff de verdade piora a frustração.
 
 RECUSA EXPLÍCITA ("não tenho interesse", "não quero", "não preciso"):
 Trate como objeção, não como encerramento automático. Primeiro, tente entender o motivo ou ofereça algo mais leve, sem pressão de agendamento: "Tudo bem! Posso te ajudar com alguma dúvida específica, sem compromisso de marcar nada?"
@@ -2253,8 +2267,11 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
         reply = call_claude(conv["messages"], max_tokens=2000,
                              system=conv["system"] + extra_disponibilidade, tipo="chat")
 
-        # Desativa "digitando..."
-        toggle_typing(inbox_identifier, contact_identifier, conversation_id, "off")
+        # Corrigido 01/09 (achado real do gestor: respostas instantâneas,
+        # mesmo as longas, soam como IA — um humano não digita um parágrafo
+        # em poucos segundos). O "digitando..." fica ligado até aqui e só
+        # desliga mais abaixo, depois do atraso proporcional ao tamanho do
+        # texto, logo antes do envio de verdade.
 
         # Salva no histórico sem o contexto de retomada (para não poluir)
         if retomada_ctx and conv["messages"] and conv["messages"][-1]["role"] == "user":
@@ -2290,6 +2307,16 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
 
         # ── Envia resposta de volta ao AgendorChat ────────────────────────────
         reply = remover_travessao(reply)
+
+        # Atraso proporcional ao tamanho, simulando tempo real de digitação —
+        # sem isso, mensagens longas saindo em poucos segundos soam como IA.
+        # ~45ms por caractere (~22 caracteres/s, digitação humana rápida no
+        # celular), limitado entre 1.5s e 12s pra não parecer trava nem demora
+        # exagerada.
+        atraso_digitacao = min(max(len(reply) * 0.045, 1.5), 12)
+        time.sleep(atraso_digitacao)
+
+        toggle_typing(inbox_identifier, contact_identifier, conversation_id, "off")
         send_agendorchat_message(conversation_id, reply)
         # Marca o início da espera por resposta do lead — usado pelo follow-up de 1h
         conv["luca_aguardando_desde"] = time.time()
@@ -2584,6 +2611,21 @@ def agendorchat_webhook():
         if segundos_humano is not None and segundos_humano < 3600:
             print(f"[webhook] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
                   f"dentro da janela de 1h conv={conversation_id}", flush=True)
+            # Corrigido 01/09 (bug real, caso Gabriel — atraso de 7h): sem
+            # isso, essa conversa fica marcada was_resolved=True pra sempre
+            # (se um humano tinha resolvido antes), e a rede de segurança
+            # (verificar_retomada_apos_silencio_humano) pula ela indefinida-
+            # mente por causa desse mesmo flag — o retorno do Luca só
+            # acontecia se algum evento externo do AgendorChat (ex:
+            # desatribuição automática por inatividade) disparasse de novo
+            # o conversation_updated. Agora, mesmo ficando quieto aqui,
+            # garante que a conversa fica "viva" pra rede de segurança
+            # conseguir retomar assim que passar a janela de 1h.
+            conv_key_humano = str(conversation_id)
+            conv_humano = conversation_histories.get(conv_key_humano)
+            if conv_humano:
+                conv_humano["was_resolved"] = False
+                conv_humano["last_msg_at"] = time.time()
             return jsonify({}), 200
 
         # ── Extrai campos do payload ──────────────────────────────────────────
@@ -2986,6 +3028,14 @@ def agendorchat_conversation_updated():
         if segundos_humano is not None and segundos_humano < 3600:
             print(f"[conv_updated] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
                   f"dentro da janela de 1h conv={conversation_id}", flush=True)
+            # Mesma correção do webhook principal (01/09, caso Gabriel) —
+            # garante que a conversa não fica invisível pra rede de
+            # segurança depois que a janela de 1h passar.
+            conv_key_humano = str(conversation_id)
+            conv_humano = conversation_histories.get(conv_key_humano)
+            if conv_humano:
+                conv_humano["was_resolved"] = False
+                conv_humano["last_msg_at"] = time.time()
             return jsonify({}), 200
 
         # ── Desatribuída e aberta: verifica se há mensagem do lead sem resposta ─
