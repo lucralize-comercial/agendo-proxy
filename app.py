@@ -195,6 +195,30 @@ NOME_DONO_CONTA_PADRAO = os.environ.get("NOME_DONO_CONTA_PADRAO", "Luiz Santos")
 # necessariamente o Ronaldo digitando de verdade, não o bot.
 LUCA_MARKER = "\u200b"
 
+# Corrigido 02/09 (bug real, confirmado por correlação exata de horário —
+# caso Vanderson/conv=1939): o template_params, embora apareça certinho no
+# webhook em tempo real, aparentemente não é preservado (ou não vem
+# preenchido) quando lemos as mensagens de volta pela API de LISTAGEM
+# (mensagens_da_conversa) — usada pelas funções de detecção de humano. Sem
+# esse dado, os próprios templates que o Luca manda (D1/D3/D5/D7/D10,
+# lembretes) ficavam sendo lidos como "o Ronaldo escreveu de verdade".
+# Como fallback independente desse metadado, mantém aqui os trechos fixos
+# (sem o {{1}}) de cada template nosso — se o conteúdo bater com um deles,
+# é o próprio Luca, não interessa o que o additional_attributes diga.
+FRAGMENTOS_TEMPLATE_LUCA = [
+    "Vi que nossa conversa ficou parada. Seja abrindo do jeito certo",
+    "Passando de novo por aqui porque talvez você tenha ficado sem tempo",
+    "sabia que o CNAE certo é a diferença entre pagar 15,5% ou 6% de imposto",
+    "Já que vimos como o CNAE certo importa",
+    "recapitulando as duas ferramentas que te mandei",
+    "Você ainda está por aí?",
+    "acho que peguei você num momento ruim",
+]
+
+
+def eh_conteudo_de_template_luca(content: str) -> bool:
+    return any(frag in (content or "") for frag in FRAGMENTOS_TEMPLATE_LUCA)
+
 
 def eh_assignee_bot(assignee: dict) -> bool:
     """Retorna True se o agente atribuído/remetente é o usuário do bot da
@@ -3364,7 +3388,8 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
                 if eh_conta_do_luca:
                     tem_marca = LUCA_MARKER in (m.get("content") or "")
                     eh_template = bool((m.get("additional_attributes") or {}).get("template_params"))
-                    if not tem_marca and not eh_template:
+                    eh_template_conhecido = eh_conteudo_de_template_luca(m.get("content"))
+                    if not tem_marca and not eh_template and not eh_template_conhecido:
                         return True  # Ronaldo escreveu manualmente por essa conta
                     continue
                 if not eh_assignee_bot(sender):
@@ -3416,7 +3441,8 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
                 if eh_conta_do_luca:
                     tem_marca = LUCA_MARKER in (m.get("content") or "")
                     eh_template = bool((m.get("additional_attributes") or {}).get("template_params"))
-                    if not tem_marca and not eh_template:
+                    eh_template_conhecido = eh_conteudo_de_template_luca(m.get("content"))
+                    if not tem_marca and not eh_template and not eh_template_conhecido:
                         ultima_humana_em = m.get("created_at") or ultima_humana_em
                     continue
                 if not eh_assignee_bot(sender):
@@ -4039,7 +4065,6 @@ def verificar_followup_4h_silencio_humano_safe():
 # candidato antes de agir (confirma etapa/status atuais de verdade, evita
 # agir em cima de cache com até 1h de atraso). Nenhum estado em RAM.
 
-FUNIL_COMERCIAL_ID = 696449
 ETAPA_NOVO_LEAD      = 2835663  # Novo Lead
 ETAPA_1_CONTATO      = 3596855  # 1º Contato (D0)
 ETAPA_2_CONTATO       = 3060060  # 2° Contato
@@ -4192,7 +4217,8 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
                 if sender.get("type") != "user":
                     continue
                 eh_template_automatico = bool((m.get("additional_attributes") or {}).get("automation_id")
-                                               or (m.get("additional_attributes") or {}).get("template_params"))
+                                               or (m.get("additional_attributes") or {}).get("template_params")
+                                               or eh_conteudo_de_template_luca(m.get("content")))
                 if eh_template_automatico:
                     continue
                 nome_sender = (sender.get("name") or "").strip().lower()
