@@ -181,6 +181,12 @@ INBOXES_IGNORADOS = {
     int(i.strip()) for i in os.environ.get("INBOXES_IGNORADOS", "2283").split(",") if i.strip()
 }
 
+# Criado 02/09 (Ronaldo): gatilho pra demonstrações ao vivo (ex: QR Code em
+# apresentação) — o Luca conversa 100% normal, mas a conversa NUNCA vira
+# negócio de verdade no Agendor, e nenhum follow-up (1h/4h/D1-D10) é
+# agendado pra ela. Frase pré-preenchida no link do WhatsApp (wa.me).
+GATILHO_DEMO = "demonstração do luca"
+
 
 LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Ronaldo Cassimiro")  # nome real da conta que o bot usa pra enviar
 LUCA_BOT_NOME_EXIBICAO = os.environ.get("LUCA_BOT_NOME_EXIBICAO", "Luca")  # available_name configurado nessa conta
@@ -2386,7 +2392,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                 termos_encerramento = ["acompanhamento", "sinal verde", "é só me avisar", "estou por aqui"]
                 conversa_encerrada = any(t in reply.lower() for t in termos_encerramento)
 
-                if (dados_completos or conversa_encerrada) and not conv.get("note_sent"):
+                if (dados_completos or conversa_encerrada) and not conv.get("note_sent") and not conv.get("modo_demo"):
                     d["telefone"] = conv.get("phone") or d.get("telefone", "Não informado")
                     note_text = build_lead_note(d)
                     send_private_note(conversation_id, note_text)
@@ -2699,6 +2705,18 @@ def agendorchat_webhook():
         conv = conversation_histories[conv_key]
         if contact_phone:
             conv["phone"] = contact_phone
+
+        # Gatilho de demonstração (02/09): marca a conversa pra nunca virar
+        # negócio no CRM nem gerar follow-up — conversa acontece 100% normal
+        # pro lado do lead, só os efeitos colaterais no Agendor são pulados.
+        if GATILHO_DEMO in message_text.lower():
+            conv["modo_demo"] = True
+            print(f"[demo] Gatilho detectado, conv={conversation_id} nunca vira negócio real", flush=True)
+
+        if conv.get("modo_demo"):
+            # Nunca dispara o aviso de "retorno por silêncio" pra uma conversa demo
+            pass
+        elif contact_phone:
             # Se o negócio já tinha escalado por silêncio (2°/3° Contato),
             # o lead respondendo agora é um "retorno" — sinaliza pro time.
             # Em thread separada, não atrasa a resposta do Luca.
@@ -2989,7 +3007,7 @@ def verificar_retomada_apos_silencio_humano():
         except (TypeError, ValueError):
             continue
         conv = conversation_histories.get(conv_key)
-        if not conv or conv.get("was_resolved"):
+        if not conv or conv.get("was_resolved") or conv.get("modo_demo"):
             continue
         last_msg_at = conv.get("last_msg_at") or 0
         if agora - last_msg_at > 86400:  # sem atividade há mais de 24h — ignora
@@ -3898,6 +3916,8 @@ def verificar_followup_1h_silencio():
     (conversation_histories) — reseta se o processo reiniciar nesse meio-tempo."""
     agora = time.time()
     for conv_key, conv in list(conversation_histories.items()):
+        if conv.get("modo_demo"):
+            continue  # conversa de demonstração — nunca gera follow-up
         aguardando_desde = conv.get("luca_aguardando_desde")
         if not aguardando_desde or conv.get("followup_1h_enviado"):
             continue
@@ -3981,6 +4001,8 @@ def verificar_followup_4h_silencio_humano():
         return
     agora = time.time()
     for conv_key, conv in list(conversation_histories.items()):
+        if conv.get("modo_demo"):
+            continue  # conversa de demonstração — nunca gera follow-up
         aguardando_desde = conv.get("humano_aguardando_desde")
         if not aguardando_desde or conv.get("followup_humano_enviado"):
             continue
