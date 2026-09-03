@@ -12,15 +12,15 @@ import json
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*", "methods": ["GET", "POST", "OPTIONS"], "allow_headers": ["Content-Type"]}})
 
-AGENDOR_TOKEN = os.environ.get("AGENDOR_TOKEN", "a89b0def-fd5e-45ed-981f-efe89f20159a")
+AGENDOR_TOKEN = os.environ.get("AGENDOR_TOKEN", "")  # CONFIGURE via variável de ambiente
 AGENDOR_BASE = "https://api.agendor.com.br/v3"
 HEADERS = {"Authorization": f"Token {AGENDOR_TOKEN}"}
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
-AUTENTIQUE_TOKEN = os.environ.get("AUTENTIQUE_TOKEN", "49cde424806e0f64f13bbee6c782e6f8693762078a3f58a0ae34b5bce4268686")
-AUTENTIQUE_TOKEN_EVERTON = os.environ.get("AUTENTIQUE_TOKEN_EVERTON", "ec582dbc7c93dbd538ee1bd734d6a1c3bb0cb3e52f7ed67bfdd1ff1605e9af82")
-AUTENTIQUE_TOKEN_GIOVANNA = os.environ.get("AUTENTIQUE_TOKEN_GIOVANNA", "6420de60a459b4fa74bf01a4a4b779cb89025e2ffdb4002ce89171d1627652dd")
-AUTENTIQUE_TOKEN_LUIZ = os.environ.get("AUTENTIQUE_TOKEN_LUIZ", "dc637baedb399a3d54ebdc932e1b93d0ea204c0db3fb8ffd6fbe3a4a00f094e7")
-AUTENTIQUE_TOKEN_BRENDA = os.environ.get("AUTENTIQUE_TOKEN_BRENDA", "a6bd6c9bb6b100fb3928ca42799364fd012193a51c4b0440a7443488943df3fb")
+AUTENTIQUE_TOKEN = os.environ.get("AUTENTIQUE_TOKEN", "")  # CONFIGURE via variável de ambiente
+AUTENTIQUE_TOKEN_USUARIO1 = os.environ.get("AUTENTIQUE_TOKEN_USUARIO1", "")  # CONFIGURE via variável de ambiente
+AUTENTIQUE_TOKEN_USUARIO2 = os.environ.get("AUTENTIQUE_TOKEN_USUARIO2", "")  # CONFIGURE via variável de ambiente
+AUTENTIQUE_TOKEN_USUARIO3 = os.environ.get("AUTENTIQUE_TOKEN_USUARIO3", "")  # CONFIGURE via variável de ambiente
+AUTENTIQUE_TOKEN_USUARIO4 = os.environ.get("AUTENTIQUE_TOKEN_USUARIO4", "")  # CONFIGURE via variável de ambiente
 AUTENTIQUE_BASE = "https://api.autentique.com.br/v2/graphql"
 
 FUNIS_HISTORICO = ["Funil Comercial"]
@@ -128,7 +128,7 @@ Use "alguém do nosso time" ou "alguém do time aqui", não "um atendente" nem "
 RECUSA EXPLÍCITA ("não tenho interesse", "não quero", "não preciso"):
 Trate como objeção, não como encerramento automático. Primeiro, tente entender o motivo ou ofereça algo mais leve, sem pressão de agendamento: "Tudo bem! Posso te ajudar com alguma dúvida específica, sem compromisso de marcar nada?"
 Se a resposta do lead deixar QUALQUER abertura (ele responde, faz uma pergunta, demonstra curiosidade), continue ajudando normalmente, sem forçar volta ao roteiro de qualificação.
-Só recue de verdade quando a recusa for clara e repetida, sem nenhuma abertura. Nesse caso: "Sem problemas, Thiago! Qualquer coisa, estou por aqui." E pare. Não insista, não pergunte de novo sobre segmento ou agendamento.
+Só recue de verdade quando a recusa for clara e repetida, sem nenhuma abertura. Nesse caso: "Sem problemas, [lead]! Qualquer coisa, estou por aqui." E pare. Não insista, não pergunte de novo sobre segmento ou agendamento.
 Avalie pelo contexto, não por uma contagem fixa de recusas. O sinal é se a porta ficou aberta ou fechada na resposta do lead.
 
 SE PERGUNTAREM SE VOCÊ É IA, ROBÔ OU BOT:
@@ -164,50 +164,50 @@ REGRAS INEGOCIÁVEIS:
 - Responda apenas em português brasileiro"""
 
 
-AGENDORCHAT_TOKEN      = os.environ.get("AGENDORCHAT_TOKEN", "3t9nxq9fmZLyd9SfH7JEsqK8")
+AGENDORCHAT_TOKEN      = os.environ.get("AGENDORCHAT_TOKEN", "")  # CONFIGURE via variável de ambiente
 # Token usado para AÇÕES VISÍVEIS ao lead (enviar mensagem, "digitando...").
 # Se configurado com o token do usuário "Bot", as mensagens do Luca saem em
-# nome do Bot em vez do Ronaldo. Leituras e notas continuam no token principal.
+# nome do Bot em vez do [gestor]. Leituras e notas continuam no token principal.
 LUCA_SEND_TOKEN        = os.environ.get("LUCA_SEND_TOKEN", "") or AGENDORCHAT_TOKEN
-AGENDORCHAT_ACCOUNT_ID = os.environ.get("AGENDORCHAT_ACCOUNT_ID", "1035")
+AGENDORCHAT_ACCOUNT_ID = os.environ.get("AGENDORCHAT_ACCOUNT_ID", "")  # CONFIGURE: ID da conta no AgendorChat
 AGENDORCHAT_BASE       = "https://chat.agendor.com.br/api/v1"
 
-# Criado 27/08 (Ronaldo): agora existem dois WhatsApp conectados no
+# Criado 27/08 ([gestor]): agora existem dois WhatsApp conectados no
 # AgendorChat — o inbox comercial (2367, onde o Luca atua normalmente) e
 # um segundo, conectado via canal "Connector" pra teste, no qual o Luca
 # NUNCA deve interagir. Lista separada por vírgula via env var, caso mais
 # inboxes precisem ser excluídos no futuro.
 INBOXES_IGNORADOS = {
-    int(i.strip()) for i in os.environ.get("INBOXES_IGNORADOS", "2283").split(",") if i.strip()
+    int(i.strip()) for i in os.environ.get("INBOXES_IGNORADOS", "").split(",") if i.strip()
 }
 
-# Criado 02/09 (Ronaldo): gatilho pra demonstrações ao vivo (ex: QR Code em
+# Criado 02/09 ([gestor]): gatilho pra demonstrações ao vivo (ex: QR Code em
 # apresentação) — o Luca conversa 100% normal, mas a conversa NUNCA vira
 # negócio de verdade no Agendor, e nenhum follow-up (1h/4h/D1-D10) é
 # agendado pra ela. Frase pré-preenchida no link do WhatsApp (wa.me).
 GATILHO_DEMO = "demonstração do luca"
 
 
-LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Ronaldo Cassimiro")  # nome real da conta que o bot usa pra enviar
+LUCA_BOT_NOME_REAL = os.environ.get("LUCA_BOT_NOME_REAL", "Nome Sobrenome")  # CONFIGURE: nome exato da conta usada pra enviar  # nome real da conta que o bot usa pra enviar
 LUCA_BOT_NOME_EXIBICAO = os.environ.get("LUCA_BOT_NOME_EXIBICAO", "Luca")  # available_name configurado nessa conta
-NOME_DONO_CONTA_PADRAO = os.environ.get("NOME_DONO_CONTA_PADRAO", "Luiz Santos")  # dono padrão do CRM — nunca escreve pessoalmente pro lead
+NOME_DONO_CONTA_PADRAO = os.environ.get("NOME_DONO_CONTA_PADRAO", "Dono Padrao")  # CONFIGURE: dono padrão do CRM  # dono padrão do CRM — nunca escreve pessoalmente pro lead
 
-# Corrigido 25/08 (achado real de Ronaldo): o Luca manda mensagem usando a
-# MESMA conta que Ronaldo usa pra escrever manualmente — pro AgendorChat,
+# Corrigido 25/08 (achado real de [gestor]): o Luca manda mensagem usando a
+# MESMA conta que [gestor] usa pra escrever manualmente — pro AgendorChat,
 # as duas coisas são indistinguíveis (mesmo sender.id, mesmo nome). Sem
 # licença sobrando pra criar uma conta separada só pro bot, a saída é essa
 # marca invisível (espaço de largura zero) no final de toda mensagem que
 # o Luca manda via API. Uma mensagem da mesma conta SEM essa marca é
-# necessariamente o Ronaldo digitando de verdade, não o bot.
+# necessariamente o [gestor] digitando de verdade, não o bot.
 LUCA_MARKER = "\u200b"
 
 # Corrigido 02/09 (bug real, confirmado por correlação exata de horário —
-# caso Vanderson/conv=1939): o template_params, embora apareça certinho no
+# caso [lead]/conv=1939): o template_params, embora apareça certinho no
 # webhook em tempo real, aparentemente não é preservado (ou não vem
 # preenchido) quando lemos as mensagens de volta pela API de LISTAGEM
 # (mensagens_da_conversa) — usada pelas funções de detecção de humano. Sem
 # esse dado, os próprios templates que o Luca manda (D1/D3/D5/D7/D10,
-# lembretes) ficavam sendo lidos como "o Ronaldo escreveu de verdade".
+# lembretes) ficavam sendo lidos como "o [gestor] escreveu de verdade".
 # Como fallback independente desse metadado, mantém aqui os trechos fixos
 # (sem o {{1}}) de cada template nosso — se o conteúdo bater com um deles,
 # é o próprio Luca, não interessa o que o additional_attributes diga.
@@ -232,26 +232,26 @@ def eh_assignee_bot(assignee: dict) -> bool:
     conversas atribuídas a ele são território do Luca (ele responde
     normalmente, nunca se cala por essa atribuição).
 
-    Corrigido em 13/08 (achado real, confirmado por Ronaldo): o Luca manda
-    mensagem usando a CONTA REAL do Ronaldo no Agendor — o nome de verdade
-    (campo 'name') é 'Ronaldo Cassimiro', e 'Luca' é só um nome de exibição
+    Corrigido em 13/08 (achado real, confirmado por [gestor]): o Luca manda
+    mensagem usando a CONTA REAL do [gestor] no Agendor — o nome de verdade
+    (campo 'name') é '[gestor] Cassimiro', e 'Luca' é só um nome de exibição
     configurado nessa conta ('available_name'). A checagem anterior
     comparava só 'name' contra a env LUCA_BOT_ASSIGNEE, cujo padrão nunca
-    foi nem 'Ronaldo Cassimiro' nem 'Luca' (valor padrão era 'Bot', nunca
+    foi nem '[gestor] Cassimiro' nem 'Luca' (valor padrão era 'Bot', nunca
     configurado no Railway) — essa checagem NUNCA bateu corretamente, em
     nenhum contexto, desde sempre. Isso explica os bugs reais de Luca
-    respondendo por cima de humanos (caso Everton/Andressa, 13/08) e o
+    respondendo por cima de humanos (caso [especialista]/[lead], 13/08) e o
     risco inverso de Luca se calar por engano ao encontrar a PRÓPRIA
-    mensagem antiga (caso Pietro/Luiz Santos, 07/08) — os dois lados desse
+    mensagem antiga (caso [lead]/[dono padrão], 07/08) — os dois lados desse
     mesmo problema de fundo. Agora compara contra os dois nomes reais, seja
     qual campo estiver presente no objeto checado (assignee costuma trazer
     'name'+'available_name'; sender de mensagem pode trazer só um dos
     dois, dependendo do endpoint).
 
-    Também adicionado em 13/08: o Luiz Santos é o "dono da conta" padrão
+    Também adicionado em 13/08: o [dono padrão] é o "dono da conta" padrão
     do Agendor, pra quem negócios/conversas sem responsável definido caem
     automaticamente (limitação da integração nativa do Agendor, ainda sem
-    solução definitiva do lado deles). Confirmado por Ronaldo que ele
+    solução definitiva do lado deles). Confirmado por [gestor] que ele
     NUNCA responde pessoalmente pelo WhatsApp — é só um rótulo técnico do
     CRM. Por isso, conversa atribuída a ele deve continuar sendo território
     do Luca, igual ao próprio bot."""
@@ -395,18 +395,18 @@ def call_claude(messages: list, max_tokens: int = 300, system: str = SYSTEM_PROM
 conversation_histories = {}
 
 # ── Azure AD (agendamento Teams) ─────────────────────────────────────────────
-AZURE_CLIENT_ID     = os.environ.get("AZURE_CLIENT_ID",     "c0868f3b-764c-4c5b-a9fc-4af4b6eb0baf")
-AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "PBL8Q~pfG-XmBkvvmv5K~NgY-pLxpWlbayUE5aOb")
-AZURE_TENANT_ID     = os.environ.get("AZURE_TENANT_ID",     "5173aa83-66e1-49f3-9128-f2251b43294d")
+AZURE_CLIENT_ID     = os.environ.get("AZURE_CLIENT_ID",     "")  # CONFIGURE via variável de ambiente
+AZURE_CLIENT_SECRET = os.environ.get("AZURE_CLIENT_SECRET", "")  # CONFIGURE via variável de ambiente
+AZURE_TENANT_ID     = os.environ.get("AZURE_TENANT_ID",     "")  # CONFIGURE via variável de ambiente
 
 # Organizador e convidados fixos da reunião com o especialista — confirmado
-# com Ronaldo em 11/08: o Everton normalmente conduz, Ronaldo e Luiz ficam
+# com [gestor] em 11/08: o [especialista] normalmente conduz, [gestor] e Luiz ficam
 # em cópia pra acompanhar. Substituição de organizador em caso de
 # indisponibilidade continua manual (não previsível no momento do agendamento).
-TEAMS_ORGANIZADOR = os.environ.get("TEAMS_ORGANIZADOR", "evertonsilva@lucralize.com.br")
+TEAMS_ORGANIZADOR = os.environ.get("TEAMS_ORGANIZADOR", "")  # CONFIGURE: e-mail do organizador
 TEAMS_COPIA = [
     e.strip() for e in os.environ.get(
-        "TEAMS_COPIA", "ronaldojunior@lucralize.com.br"
+        "TEAMS_COPIA", ""
     ).split(",") if e.strip()
 ]
 
@@ -470,7 +470,7 @@ def parece_ter_horario(texto: str) -> bool:
 
 def buscar_eventos_do_dia_organizador(dt_dia: datetime) -> list:
     """Busca os eventos reais do dia inteiro na agenda do organizador
-    (Everton) via Microsoft Graph — 1 chamada só, depois os slots livres
+    ([especialista]) via Microsoft Graph — 1 chamada só, depois os slots livres
     são calculados localmente em Python (barato, sem nova chamada por
     horário candidato). Retorna lista de (inicio, fim), datetimes naive
     em horário de Brasília. Levanta exceção se a chamada falhar (quem
@@ -553,7 +553,7 @@ def extrair_emails(texto: str) -> list:
     código tratava o texto inteiro como um único e-mail, o que quebrava
     a atualização no CRM (Agendor rejeitava com 400) e, mais grave, podia
     impedir a criação do link real da reunião no Teams (caso real:
-    Alessandra, 2 sócios, 17/08 — confirmado erro 400 no cadastro)."""
+    [lead], 2 sócios, 17/08 — confirmado erro 400 no cadastro)."""
     if not texto:
         return []
     return re.findall(r"[\w.+-]+@[\w-]+\.[\w.-]+", texto)
@@ -562,11 +562,11 @@ def extrair_emails(texto: str) -> list:
 def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
                           linha_negocio: str = "contabilidade", duracao_min: int = 30) -> dict:
     """Cria a reunião de verdade no Teams via Microsoft Graph, com:
-      - Organizador: TEAMS_ORGANIZADOR (Everton, por padrão)
-      - Convidados em cópia: TEAMS_COPIA (só Ronaldo, por padrão — Luiz
+      - Organizador: TEAMS_ORGANIZADOR ([especialista], por padrão)
+      - Convidados em cópia: TEAMS_COPIA (só [gestor], por padrão — Luiz
         removido temporariamente em 11/08, estava recebendo e-mail demais)
       - Convidado externo: o lead (obrigatório, recebe o convite por e-mail)
-    duracao_min: 30 min por padrão (confirmado com Ronaldo em 11/08) — é
+    duracao_min: 30 min por padrão (confirmado com [gestor] em 11/08) — é
     margem de segurança na agenda, não é o que se promete ao lead na
     conversa (o SYSTEM_PROMPT continua dizendo "20 minutinhos" de propósito,
     a diferença cobre atraso no início/fim e evita sobrepor com a próxima).
@@ -586,7 +586,7 @@ def create_teams_meeting(lead_name: str, lead_email: str, start_iso: str,
       - Falta um pré-requisito que ainda não tínhamos identificado: além da
         permissão de app (OnlineMeetings.ReadWrite.All), a Microsoft exige
         uma "Application Access Policy" concedendo ao app acesso às
-        reuniões de um usuário específico (Everton) — isso é configurado
+        reuniões de um usuário específico ([especialista]) — isso é configurado
         via PowerShell (Teams/Skype for Business Online), não pelo Azure
         Portal, e provavelmente explica os 403 mesmo com a permissão certa.
       - Object ID (não e-mail/UPN) é mesmo o formato certo pra essa chamada,
@@ -866,7 +866,11 @@ def fetch_deals():
         if not data.get("links", {}).get("next") or len(page_deals) == 0:
             break
         page += 1
-        time.sleep(0.2)
+        # Corrigido 03/09: 0.2s não bastava — 429 continuava aparecendo
+        # regularmente nas páginas mais pesadas (produção confirmou). Subindo
+        # pra 0.4s como medida preventiva, não só reativa (o backoff em
+        # fetch_page já cobre o caso de falhar mesmo assim).
+        time.sleep(0.4)
     cache["deals"] = all_deals
     cache["total"] = total_count or len(all_deals)
     cache["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1052,7 +1056,7 @@ def fetch_autentique_account(token):
 
 def fetch_autentique_all():
     print("Buscando documentos do Autentique (3 contas)...", flush=True)
-    tokens = [AUTENTIQUE_TOKEN, AUTENTIQUE_TOKEN_EVERTON, AUTENTIQUE_TOKEN_GIOVANNA, AUTENTIQUE_TOKEN_LUIZ, AUTENTIQUE_TOKEN_BRENDA]
+    tokens = [AUTENTIQUE_TOKEN, AUTENTIQUE_TOKEN_USUARIO1, AUTENTIQUE_TOKEN_USUARIO2, AUTENTIQUE_TOKEN_USUARIO3, AUTENTIQUE_TOKEN_USUARIO4]
     seen_ids = set()
     all_docs = []
     for token in tokens:
@@ -1133,7 +1137,7 @@ def send_agendorchat_message(conversation_id: int, text: str):
     """Envia resposta do Luca de volta ao lead via API do AgendorChat.
     Adiciona uma marca invisível no final (LUCA_MARKER) — ver comentário
     na definição da constante — pra depois conseguir distinguir isso de
-    uma mensagem que o Ronaldo escreveu manualmente pela mesma conta."""
+    uma mensagem que o [gestor] escreveu manualmente pela mesma conta."""
     url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}/messages"
     resp = requests.post(
         url,
@@ -1156,7 +1160,7 @@ def resolver_conversa_agendorchat(conversation_id: int) -> bool:
     assigned_users). Usado depois do follow-up de dias (D+1/D+3/D+5/D+7/D+10): manda
     a mensagem, reabre naturalmente, e o Luca fecha de novo — assim a
     caixa de conversas "abertas" no AgendorChat só mostra o que realmente
-    precisa de atenção humana (decisão de Ronaldo, 13/08)."""
+    precisa de atenção humana (decisão de [gestor], 13/08)."""
     try:
         url = f"{AGENDORCHAT_BASE}/accounts/{AGENDORCHAT_ACCOUNT_ID}/conversations/{conversation_id}/toggle_status"
         resp = requests.post(url, headers={"api_access_token": LUCA_SEND_TOKEN, "Content-Type": "application/json"},
@@ -1232,7 +1236,7 @@ def buscar_pessoa_e_negocio(phone):
 
     Correção de 12/08 (caso real confirmado): o mesmo telefone pode ter
     MAIS DE UMA pessoa cadastrada no Agendor (contato duplicado — ex:
-    "Everton Pereira" e "Everton - via Luca (WhatsApp)" como registros
+    "[especialista] Pereira" e "[especialista] - via Luca (WhatsApp)" como registros
     separados). A versão anterior só olhava a primeira pessoa retornada
     pela busca; se o negócio ativo no Funil Comercial estivesse na
     SEGUNDA pessoa, a função nunca achava, tentava criar um negócio novo,
@@ -1330,7 +1334,7 @@ def parse_preferencia_datetime(preferencia: str, tipo: str = "agendamento"):
     quando chamado na checagem em tempo real de agenda (11/08), pra não
     misturar esse custo com o de "chat" nem esconder ele lá dentro.
 
-    Corrigido 26/08 (bug real, confirmado com o lead Pedrinho): o
+    Corrigido 26/08 (bug real, confirmado com o lead [lead]): o
     docstring antigo desta função dizia que o Claude 'já recebe a data
     atual de Brasília no system', mas isso nunca foi implementado de
     verdade — a chamada usava o system padrão (SYSTEM_PROMPT, o persona
@@ -1379,7 +1383,7 @@ def criar_negocio_funil_comercial(person_id, nome: str):
       - Se esse negócio existente ainda está ATIVO (não ganho/perdido),
         reaproveita ele — é o mesmo negócio de verdade, só o título colidiu.
       - Se esse negócio existente já está GANHO ou PERDIDO, NÃO reaproveita
-        (Ronaldo confirmou: nesse caso precisa criar um negócio novo de
+        ([gestor] confirmou: nesse caso precisa criar um negócio novo de
         verdade) — em vez disso, tenta de novo com um sufixo sequencial
         limpo: "(1)", "(2)", "(3)"... pegando o primeiro número livre."""
     nome_final = nome or "Lead via Luca (WhatsApp)"
@@ -1627,7 +1631,7 @@ def registrar_no_crm(conv, conversation_id, contact_name):
                 return
         deal_id = deal.get("id")
 
-        # ── Guard durável contra restart do processo (bug real: caso Walter,
+        # ── Guard durável contra restart do processo (bug real: caso [lead],
         # 11/08) ──────────────────────────────────────────────────────────
         # conv["crm_registrado"] é só RAM — se o processo reiniciar (ex:
         # redeploy) entre o registro original e uma retomada da mesma
@@ -1781,7 +1785,7 @@ def registrar_no_crm(conv, conversation_id, contact_name):
             # arquivo (ORDEM_ETAPAS_FUNIL_COMERCIAL) em vez de uma cópia
             # local — eram 2 cópias idênticas, risco de ficarem
             # dessincronizadas de novo no futuro (foi exatamente isso que
-            # causou o bug real da Milena, 13/08).
+            # causou o bug real da [lead], 13/08).
             try:
                 deal_fresco = buscar_deal_fresco(deal_id)
             except Exception as e:
@@ -2207,7 +2211,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
             # os 90s de espera), a Messages API interpreta isso como
             # "continue esse turno do assistant" em vez de "responda de
             # novo" — e como o template já é uma frase fechada, o resultado
-            # é resposta vazia, sempre (bug real confirmado: caso Millena,
+            # é resposta vazia, sempre (bug real confirmado: caso [lead],
             # 12/08, 3 tentativas, todas vazias). O Claude não precisa "ver"
             # o texto literal do template pra saber que já foi enviado, só
             # precisa da instrução abaixo — então remove esse turno final
@@ -2276,7 +2280,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
         # histórico compartilhado — sem isso, a conversa termina no turno
         # errado e a Messages API devolve resposta vazia sempre (mesmo
         # sintoma do bug da Millela, 12/08, mas por concorrência entre
-        # threads, não por falta de segunda mensagem — caso real: Andressa,
+        # threads, não por falta de segunda mensagem — caso real: [lead],
         # conv=1753, 13/08, aconteceu 2x na mesma conversa). Roda sempre,
         # não só no caminho de primeira mensagem, porque qualquer thread
         # (retomada, conv_updated, mensagem normal) pode sofrer essa corrida.
@@ -2376,7 +2380,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                     # vez (note_sent), quando o lead dizia o dia/horário
                     # exato minutos depois, o sistema já tinha "carimbado"
                     # a conversa como concluída e NUNCA criava a reunião real
-                    # no Teams (caso real: Alessandra, 17/08 — ficou só com
+                    # no Teams (caso real: [lead], 17/08 — ficou só com
                     # uma tarefa "HORÁRIO A CONFIRMAR", sem link nenhum).
                     # Usa o filtro barato (parece_ter_horario, regex, sem
                     # Claude) primeiro — só chama parse_preferencia_datetime
@@ -2406,7 +2410,7 @@ def _processar_resposta_luca(conv_key, conversation_id, msg_token, message_id,
                     # (a IA reconhece a perda pelo texto, ex: "já segui com
                     # outra empresa"), mas isso ficava só escrito no
                     # resumo/nota — nada movia a etapa de verdade no funil
-                    # (caso real: Thiago Mateus, deal=44854914, 18/08, ficou
+                    # (caso real: [lead], deal=44854914, 18/08, ficou
                     # preso em "Novo Lead" mesmo marcado como perdido na
                     # nota). Agora, se o status indicar perda, move pra
                     # "Perdido" genérico de verdade.
@@ -2461,8 +2465,8 @@ def agendorchat_webhook():
         # buscar a listagem de mensagens da conversa pra ler o status real.
         # Se vier 'failed' (número inválido/sem WhatsApp), o lead nunca teve
         # chance de responder de verdade — mesmo critério de "sem contato"
-        # (decisão de Ronaldo, 20/08), então move pra 'Perdido - sem contato
-        # (D5)', onde o Everton confere manualmente.
+        # (decisão de [gestor], 20/08), então move pra 'Perdido - sem contato
+        # (D5)', onde o [especialista] confere manualmente.
         if event == "message_updated":
             msg_id = body.get("id")
             conversation = body.get("conversation") or {}
@@ -2489,7 +2493,7 @@ def agendorchat_webhook():
             if phone:
                 _, deal = buscar_pessoa_e_negocio(phone)
                 if deal:
-                    # Corrigido 21/08 (Ronaldo): só move pra "sem contato" se
+                    # Corrigido 21/08 ([gestor]): só move pra "sem contato" se
                     # o negócio AINDA não teve nenhum contato de verdade —
                     # senão uma mensagem posterior (ex: lembrete) que falhe
                     # apagaria um progresso real já feito (Contato
@@ -2514,7 +2518,7 @@ def agendorchat_webhook():
             print(f"[webhook] IGNORADO event={event}", flush=True)
             return jsonify({}), 200
         if message_type != "incoming":
-            # Caso real (17/08, Thiago): a automação nativa que cria o
+            # Caso real (17/08, [lead]): a automação nativa que cria o
             # negócio + manda a saudação às vezes atrasa bastante (o
             # negócio demora pra ser criado no Agendor), e a saudação
             # chega no meio de uma conversa já avançada com o Luca —
@@ -2532,7 +2536,7 @@ def agendorchat_webhook():
                         # pode ter várias mensagens só que antigas — o que
                         # importa é se o lead está falando AGORA, no meio da
                         # correria, quando a saudação atrasada chega (caso
-                        # real: Thiago, 17/08, mandando mensagem a cada 1-2
+                        # real: [lead], 17/08, mandando mensagem a cada 1-2
                         # min quando a saudação chegou 9min depois do início).
                         ultima_incoming = None
                         for m in msgs_previas:
@@ -2578,7 +2582,7 @@ def agendorchat_webhook():
                     except Exception as e:
                         print(f"[webhook] Erro ao checar saudação atrasada conv={conv_id_saudacao}: {e}", flush=True)
 
-            # ── Corrigido 25/08 (Ronaldo): mensagem humana genuína também
+            # ── Corrigido 25/08 ([gestor]): mensagem humana genuína também
             # merece um follow-up de silêncio, só que com uma janela maior
             # (4h, só dentro do horário comercial) — diferente da mensagem
             # do Luca (1h, texto mais leve). Mesmo esquema da marca
@@ -2593,7 +2597,7 @@ def agendorchat_webhook():
                 eh_mensagem_do_bot = eh_conta_do_luca and LUCA_MARKER in content_out
                 eh_generico_ou_automatico = (sender_out.get("type") != "user" or automation_id_out
                                               or template_params_out or eh_assignee_bot(sender_out))
-                # Corrigido 01/09 (bug real, caso Gabriel): content vazio/null
+                # Corrigido 01/09 (bug real, caso [lead]): content vazio/null
                 # geralmente é reação de emoji ou atualização de status, não
                 # uma mensagem de verdade — sem esse guard, o classificador
                 # recebia string vazia e (por segurança, no erro) tendia a
@@ -2637,7 +2641,7 @@ def agendorchat_webhook():
             # nunca pior que o comportamento antigo.
             assignee = (body.get("conversation") or {}).get("meta", {}).get("assignee")
             print(f"[webhook] get_conversation_details falhou, usando snapshot do payload conv={conversation_id}", flush=True)
-        # Corrigido 25/08 (Ronaldo): não depende mais de haver alguém
+        # Corrigido 25/08 ([gestor]): não depende mais de haver alguém
         # EXPLICITAMENTE atribuído — o que importa é só quando foi a
         # última mensagem humana genuína, não quem está no campo
         # "assignee". Dá 1h de folga pro humano continuar sem o Luca
@@ -2646,7 +2650,7 @@ def agendorchat_webhook():
         if segundos_humano is not None and segundos_humano < 3600:
             print(f"[webhook] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
                   f"dentro da janela de 1h conv={conversation_id}", flush=True)
-            # Corrigido 01/09 (bug real, caso Gabriel — atraso de 7h): sem
+            # Corrigido 01/09 (bug real, caso [lead] — atraso de 7h): sem
             # isso, essa conversa fica marcada was_resolved=True pra sempre
             # (se um humano tinha resolvido antes), e a rede de segurança
             # (verificar_retomada_apos_silencio_humano) pula ela indefinida-
@@ -2993,7 +2997,7 @@ def tentar_retomar_conversa(conversation_id: int, origem: str = "conv_updated") 
 
 
 def verificar_retomada_apos_silencio_humano():
-    """Criado 25/08 (Ronaldo): rede de segurança pro caso do evento
+    """Criado 25/08 ([gestor]): rede de segurança pro caso do evento
     conversation_updated do AgendorChat não disparar bem na marca de 1h
     depois de uma intervenção humana com mensagem do lead pendente. Varre
     (a cada 15 min) as conversas ativas na memória, e para cada uma que já
@@ -3068,14 +3072,14 @@ def agendorchat_conversation_updated():
             print(f"[conv_updated] IGNORADO — conversa resolvida", flush=True)
             return jsonify({}), 200
 
-        # Corrigido 25/08 (Ronaldo): mesma lógica do webhook principal —
+        # Corrigido 25/08 ([gestor]): mesma lógica do webhook principal —
         # não depende de assignee, só de quando foi a última mensagem
         # humana genuína. 1h de folga antes do Luca retomar.
         segundos_humano = segundos_desde_ultima_intervencao_humana(conversation_id)
         if segundos_humano is not None and segundos_humano < 3600:
             print(f"[conv_updated] IGNORADO — humano escreveu há {int(segundos_humano)}s, "
                   f"dentro da janela de 1h conv={conversation_id}", flush=True)
-            # Mesma correção do webhook principal (01/09, caso Gabriel) —
+            # Mesma correção do webhook principal (01/09, caso [lead]) —
             # garante que a conversa não fica invisível pra rede de
             # segurança depois que a janela de 1h passar.
             conv_key_humano = str(conversation_id)
@@ -3149,7 +3153,7 @@ def agendar():
 #   MSG_LEMBRETE_24H / MSG_LEMBRETE_1H  textos da janela aberta ({nome},{hora},{hora_txt})
 # ═════════════════════════════════════════════════════════════════════════════
 
-AGENDORCHAT_INBOX_ID = os.environ.get("AGENDORCHAT_INBOX_ID", "2367")
+AGENDORCHAT_INBOX_ID = os.environ.get("AGENDORCHAT_INBOX_ID", "")  # CONFIGURE: ID do inbox comercial
 
 MSG_LEMBRETE_24H_PADRAO = (
     "Olá, {nome}, tudo bem?\n\n"
@@ -3220,7 +3224,7 @@ def enviar_template_conversa(conversation_id, tpl, variaveis, preview):
     logs sempre trazia esse campo junto (ex: boas_vindas_primeiro_contato,
     automation_id=41882). Sem ele, a API do AgendorChat pode aceitar a
     requisição (retorna 200), mas o WhatsApp/Gupshup rejeita a mensagem
-    por trás — caso real: Sávio Rodrigues, D5, apareceu com alerta de erro
+    por trás — caso real: [lead], D5, apareceu com alerta de erro
     no histórico do CRM mesmo com nosso log mostrando sucesso."""
     payload = {
         "content": preview,
@@ -3343,7 +3347,7 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     escrita por um usuário humano de verdade (sender.type == 'user'), não
     pelo Bot/automação. Usado pra distinguir 'atribuído mas nunca escreveu'
     (ex: automação nativa atribuindo a um humano no instante da criação da
-    conversa, sem ele ter agido — caso Victor/Luiz Santos) de 'humano
+    conversa, sem ele ter agido — caso [lead]/[dono padrão]) de 'humano
     realmente assumiu e está atendendo'.
 
     Corrigido em 13/08: a versão anterior só olhava mensagens DEPOIS da
@@ -3351,19 +3355,19 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     mensagem (ex: já vinha conversando, o lead respondeu de novo, e o
     humano ainda não teve tempo de responder essa última), a mensagem dele
     ficava fora da checagem, e o Luca respondia por cima de um atendimento
-    humano já em andamento (caso real: Everton/Andressa, 13/08 — Everton
+    humano já em andamento (caso real: [especialista]/[lead], 13/08 — [especialista]
     já tinha se apresentado e feito uma pergunta, mas o Luca respondeu a
     próxima mensagem da lead mesmo assim). Uma vez que um humano de
     verdade escreveu QUALQUER coisa na conversa, ele está no comando —
     olha a conversa inteira, não só o trecho após a última msg do lead.
 
-    Corrigido em 25/08 (achado real de Ronaldo): mesmo com a correção
+    Corrigido em 25/08 (achado real de [gestor]): mesmo com a correção
     acima, o Luca continuava respondendo por cima de mensagens que o
-    próprio Ronaldo escrevia manualmente — porque ele usa a MESMA conta
+    próprio [gestor] escrevia manualmente — porque ele usa a MESMA conta
     que o Luca usa pra enviar (sem licença sobrando pra separar). Agora
     usa a marca invisível (LUCA_MARKER) pra distinguir: uma mensagem da
-    conta do Ronaldo COM a marca é o próprio Luca (exclui); uma mensagem
-    da MESMA conta SEM a marca é o Ronaldo digitando de verdade (conta
+    conta do [gestor] COM a marca é o próprio Luca (exclui); uma mensagem
+    da MESMA conta SEM a marca é o [gestor] digitando de verdade (conta
     como humano). Pra qualquer outra conta (ex: dono padrão do CRM), a
     exclusão continua sendo total, já que o Luca nunca envia por ela.
 
@@ -3374,19 +3378,19 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
     NUNCA levam LUCA_MARKER (não dá pra adicionar caractere a um template
     aprovado sem quebrar o conteúdo aprovado pela Meta). Sem essa
     distinção, TODO envio de template pela conta do Luca era lido como
-    'Ronaldo escreveu manualmente', fazendo humano_realmente_respondeu
+    '[gestor] escreveu manualmente', fazendo humano_realmente_respondeu
     retornar True logo depois de qualquer follow-up automático ser
     enviado — o que faria o Luca se calar sozinho, ou o D10 classificar
     negócios sem contato real como 'já teve contato humano'. Agora,
     mensagem da conta do Luca com template_params (havendo marca ou não)
     também conta como o próprio bot, não como humano.
 
-    Corrigido em 01/09 (bug real, caso Lucas: D1 enviado às 10:26, conta
-    do Ronaldo/Luca 'concluiu o atendimento' logo em seguida — esse
+    Corrigido em 01/09 (bug real, caso [lead]: D1 enviado às 10:26, conta
+    do [gestor]/Luca 'concluiu o atendimento' logo em seguida — esse
     evento de resolução aparentemente gera um registro na conversa sem
     conteúdo de texto, sem marca e sem template_params, e por isso
-    passava pelos dois filtros acima como se fosse o Ronaldo escrevendo
-    de verdade. Resultado: o Luca ficou 1h+ sem responder o Lucas mesmo
+    passava pelos dois filtros acima como se fosse o [gestor] escrevendo
+    de verdade. Resultado: o Luca ficou 1h+ sem responder o [lead] mesmo
     ele reengajando com 'Oi, pode mostrar' depois do D1). Mensagem sem
     conteúdo nenhum nunca conta como intervenção humana — não tem o que
     ter sido "escrito" ali."""
@@ -3408,7 +3412,7 @@ def humano_realmente_respondeu(conversation_id: int) -> bool:
                     eh_template = bool((m.get("additional_attributes") or {}).get("template_params"))
                     eh_template_conhecido = eh_conteudo_de_template_luca(m.get("content"))
                     if not tem_marca and not eh_template and not eh_template_conhecido:
-                        return True  # Ronaldo escreveu manualmente por essa conta
+                        return True  # [gestor] escreveu manualmente por essa conta
                     continue
                 if not eh_assignee_bot(sender):
                     return True
@@ -3423,7 +3427,7 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
     (mesmo esquema de detecção de humano_realmente_respondeu), ou None se
     nenhum humano jamais escreveu nessa conversa.
 
-    Criado 25/08 (Ronaldo): antes, uma vez que um humano escrevia, o Luca
+    Criado 25/08 ([gestor]): antes, uma vez que um humano escrevia, o Luca
     se calava PRA SEMPRE naquela conversa (bug de fundo: a checagem também
     só rodava se tivesse alguém EXPLICITAMENTE atribuído — se a conversa
     estivesse sem atribuição, o Luca podia responder na hora mesmo com
@@ -3440,7 +3444,7 @@ def segundos_desde_ultima_intervencao_humana(conversation_id: int):
     tinha acabado de escrever.
 
     Corrigido em 01/09: mesmo bug do conteúdo vazio (ver nota em
-    humano_realmente_respondeu, caso Lucas) — evento de resolução de
+    humano_realmente_respondeu, caso [lead]) — evento de resolução de
     atendimento sem texto nenhum não conta como intervenção humana."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
@@ -3711,11 +3715,11 @@ def mover_novos_leads_para_1contato():
     primeira tentativa já foi feita; não dispara nada por si só, é esta
     função quem move o rótulo depois que a saudação já saiu.
 
-    Histórico de decisões (12/08, com Ronaldo):
+    Histórico de decisões (12/08, com [gestor]):
     - Uma versão anterior tentou checar "conversa aberta" pro telefone,
       pra evitar saudação duplicada em reconversão — não funcionava, porque
       toda saudação abre uma conversa, então a checagem bloqueava TODO lead
-      novo, não só o cenário de reconversão (caso real: Millena, negócio
+      novo, não só o cenário de reconversão (caso real: [lead], negócio
       nunca avançava).
     - Uma segunda versão trocou pra checar "essa pessoa já tem outro
       negócio engajado" — mas como o gatilho da automação é "Novo Lead"
@@ -3740,7 +3744,7 @@ def mover_novos_leads_para_1contato():
         and (d.get("dealStage") or {}).get("id") == ETAPA_NOVO_LEAD_ID
         and not d.get("wonAt") and not d.get("lostAt")  # exclui negócios já concluídos, mesmo
                                                           # que o campo de etapa ainda aponte pra
-                                                          # Novo Lead (caso real: Gustavo Coelho,
+                                                          # Novo Lead (caso real: [lead],
                                                           # perdido há 261 dias, nunca saiu daqui —
                                                           # confirmado em 13/08, bug real corrigido)
     ]
@@ -3753,7 +3757,7 @@ def mover_novos_leads_para_1contato():
         try:
             # Só move se a saudação automática realmente foi enviada de
             # verdade — checa a conversa real, não assume pelo simples fato
-            # do negócio estar em "Novo Lead" (correção de 12/08, a Ronaldo
+            # do negócio estar em "Novo Lead" (correção de 12/08, a [gestor]
             # pediu essa confirmação: sem isso, o rótulo podia avançar
             # mesmo que a automação nativa tivesse falhado por qualquer
             # motivo — telefone inválido, automação desativada, etc.).
@@ -3771,7 +3775,7 @@ def mover_novos_leads_para_1contato():
             msgs = mensagens_da_conversa(conv["id"])
             # Aceita QUALQUER mensagem enviada (não só as com automation_id
             # no additional_attributes) — descoberto em 13/08, corrigido
-            # depois de confirmar com Ronaldo: é a MESMA automação nativa
+            # depois de confirmar com [gestor]: é a MESMA automação nativa
             # de sempre (41882, "Novo Lead -> Enviar WhatsApp"), não uma
             # automação diferente. O problema é que o campo automation_id
             # aparece no payload do webhook em tempo real, mas não vem
@@ -3795,7 +3799,7 @@ def mover_novos_leads_para_1contato():
             # respondeu) desde a última atualização do cache. Sem essa
             # checagem, este job "puxava de volta" pra 1º Contato um negócio
             # que já tinha progredido de verdade (bug real confirmado: caso
-            # Andressa, deal=44777245, 13/08 — avançou pra Contato Retornado
+            # [lead], deal=44777245, 13/08 — avançou pra Contato Retornado
             # às 13:45, e o job rodou às 13:54 com cache de antes, movendo
             # de volta pra 1º Contato por engano).
             deal_fresco = buscar_deal_fresco(deal_id)
@@ -3877,7 +3881,7 @@ Responda apenas com uma palavra: PARADA ou FECHADA."""
 
 
 def mensagem_precisa_resposta(texto: str) -> bool:
-    """Criado 25/08 (Ronaldo): antes de ligar o cronômetro de 4h de
+    """Criado 25/08 ([gestor]): antes de ligar o cronômetro de 4h de
     silêncio após uma mensagem humana, checa se essa mensagem específica
     realmente PEDE algo do lead (uma pergunta, uma escolha, uma
     confirmação) ou se já é uma afirmação que se encerra por si só (ex:
@@ -3947,7 +3951,7 @@ def verificar_followup_1h_silencio():
 
         nome = (conv.get("contact_name_cache") or conv.get("lead_data", {}).get("nome") or "").strip()
         primeiro_nome = nome.split(" ")[0] if nome else ""
-        # Texto simplificado (25/08, Ronaldo) — versão mais leve, já que a
+        # Texto simplificado (25/08, [gestor]) — versão mais leve, já que a
         # versão "acho que peguei você num momento ruim" passou a ser usada
         # no follow-up de 4h após mensagem HUMANA (ver
         # verificar_followup_4h_silencio_humano abaixo).
@@ -3988,7 +3992,7 @@ def verificar_followup_1h_silencio_safe():
 
 
 def verificar_followup_4h_silencio_humano():
-    """Criado 25/08 (Ronaldo): igual ao follow-up de 1h, mas pra quando foi
+    """Criado 25/08 ([gestor]): igual ao follow-up de 1h, mas pra quando foi
     um HUMANO de verdade (não o Luca) quem mandou a última mensagem — o
     timer é ligado no webhook principal, quando detecta uma mensagem
     outgoing genuína (ver bloco de detecção em agendorchat_webhook). Janela
@@ -4061,7 +4065,7 @@ def verificar_followup_4h_silencio_humano_safe():
 
 
 # ── Follow-up automático de silêncio (D+1 / D+3 / D+5 / D+7 / D+10) ──────────
-# Desenho confirmado com Ronaldo em 05/08, estendido em 25/08 (D7 e D10
+# Desenho confirmado com [gestor] em 05/08, estendido em 25/08 (D7 e D10
 # novos, 2 etapas novas criadas no Agendor) — a régua de silêncio USA as
 # etapas que já existiam no Funil Comercial como o próprio estado, sem
 # marcador paralelo:
@@ -4164,7 +4168,7 @@ def mover_etapa_funil_comercial(deal_id: int, etapa_alvo_id: int, permitir_recuo
     # O log mostra os dois números: o ID pretendido (etapa_alvo_id) e a
     # posição de verdade que foi enviada (sequencia_alvo) — antes só
     # mostrava o ID, o que mascarou o bug real da lista incompleta
-    # (corrigido em 13/08, caso Milena/Contato Retornado).
+    # (corrigido em 13/08, caso [lead]/Contato Retornado).
     print(f"[funil] Etapa -> {etapa_alvo_id} (posição enviada={sequencia_alvo}) "
           f"deal={deal_id} status={r.status_code}", flush=True)
     return r.status_code in (200, 201)
@@ -4184,13 +4188,13 @@ def mover_para_contato_retornado_se_aplicavel(phone: str):
     pra "1º Contato" ainda não tinha rodado (job de 15 em 15 min) quando
     o lead já estava respondendo ativamente, o negócio ficava preso em
     "Novo Lead" a conversa inteira, mesmo com engajamento real óbvio
-    (caso real: Thiago Mateus, deal=44854914, 17-18/08 — conversa longa
+    (caso real: [lead], deal=44854914, 17-18/08 — conversa longa
     de qualificação inteira aconteceu sem sair de "Novo Lead").
 
     Também em 18/08: inclui "Perdido - sem contato (D5)" — se mandamos a
     última mensagem da cascata e o lead responde depois disso, é um
     retorno de verdade, mesmo já tendo sido marcado como perdido por
-    silêncio. NÃO inclui "Perdido" genérico (decisão de Ronaldo,
+    silêncio. NÃO inclui "Perdido" genérico (decisão de [gestor],
     18/08) — esse caso já teve contato humano e não fechou por outro
     motivo, uma resposta tardia não desfaz isso automaticamente."""
     try:
@@ -4219,17 +4223,17 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
     Corrigido em 19/08 (bug real, confirmado em produção): a checagem
     olhava só QUEM enviou (excluindo Luca/Luiz), mas não olhava se a
     MENSAGEM em si era um template automático disparado por outra conta
-    real (ex: Everton) — como 'prosseguimento_solicitacao' ou
+    real (ex: [especialista]) — como 'prosseguimento_solicitacao' ou
     'retomada_de_contato_everton'. Um template automático não é uma
     intervenção humana de verdade, mesmo saindo pela conta de um vendedor
-    real (caso real: Davisson Medeiros, deal ligado a person=70521617,
-    o template 'prosseguimento_solicitacao' saiu pela conta do Everton e
+    real (caso real: [lead], deal ligado a person=70521617,
+    o template 'prosseguimento_solicitacao' saiu pela conta do [especialista] e
     fez esse negócio nunca fechar como 'sem contato', mesmo sem nenhuma
     palavra escrita de verdade por ninguém).
 
     Corrigido em 25/08: mesmo esquema do humano_realmente_respondeu — usa
-    LUCA_MARKER pra distinguir mensagem da conta do Ronaldo enviada pelo
-    Luca (com marca) de mensagem que o Ronaldo escreveu manualmente pela
+    LUCA_MARKER pra distinguir mensagem da conta do [gestor] enviada pelo
+    Luca (com marca) de mensagem que o [gestor] escreveu manualmente pela
     mesma conta (sem marca, conta como humano de verdade)."""
     try:
         msgs = mensagens_da_conversa(conversation_id)
@@ -4246,7 +4250,7 @@ def humano_ja_atendeu_alguma_vez(conversation_id: int) -> bool:
                 nome_sender = (sender.get("name") or "").strip().lower()
                 if nome_sender == LUCA_BOT_NOME_REAL.strip().lower():
                     if LUCA_MARKER not in (m.get("content") or ""):
-                        return True  # Ronaldo escreveu manualmente por essa conta
+                        return True  # [gestor] escreveu manualmente por essa conta
                     continue
                 if not eh_assignee_bot(sender):
                     return True
@@ -4267,7 +4271,7 @@ def marcar_perdido_sem_contato(deal_id: int) -> bool:
 
     Corrigido em 12/08: a versão anterior usava PUT /deals/{id}/status com
     dealStatus=3 + lostReason (nunca confirmado, campo/formato incerto).
-    Ronaldo mostrou que "Perdido - sem contato (D5)" é uma ETAPA própria
+    [gestor] mostrou que "Perdido - sem contato (D5)" é uma ETAPA própria
     do funil agora (confirmado via JSON real da API: id=3650939, posição 5,
     logo depois de '3° Contato (D3)'), não um status/motivo separado. Isso
     elimina toda a incerteza anterior — usa o mesmo mecanismo de mover
@@ -4281,7 +4285,7 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     do WhatsApp certamente está fechada (o lead está silencioso há 1+ dia),
     então isso SEMPRE usa template aprovado da Meta, nunca mensagem livre.
 
-    Só usa os templates Tech (12/08, decisão de Ronaldo: manter só Tech por
+    Só usa os templates Tech (12/08, decisão de [gestor]: manter só Tech por
     ora, os da Contabilidade não foram escritos e não serão usados agora).
 
     ⚠️ Os templates abaixo (followup_silencio_d1/d3/d5_tech) já existem e
@@ -4294,7 +4298,7 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     prévia ali (ex: "Ainda por aqui, se quiser retomar é só me chamar.")
     em vez do texto completo do template aprovado — confirmado no caso
     real do Ricardo Ribeiro (D3), que recebeu essa frase curta genérica
-    em vez da mensagem de verdade que fechamos com o Ronaldo. Agora
+    em vez da mensagem de verdade que fechamos com o [gestor]. Agora
     manda o texto completo, igual ao que está aprovado no Meta."""
     nome_template = {"D1": "followup_silencio_d1_tech",
                       "D3": "followup_silencio_d3_tech",
@@ -4308,7 +4312,7 @@ def enviar_followup_dia(conversation_id, deal_id, phone, tag, nome) -> bool:
     # automática — se a mudança de etapa (mover_etapa_funil_comercial)
     # falhar por qualquer motivo depois do envio, o negócio fica preso e
     # a régua bate de novo dias depois, reenviando a MESMA mensagem final
-    # (caso real: Davisson Medeiros, D5 enviado em 14/08 e de novo em
+    # (caso real: [lead], D5 enviado em 14/08 e de novo em
     # 19/08 — 5 dias de diferença, na época em que D5 era a última). Um
     # marcador único na própria conversa garante que a última tentativa
     # NUNCA sai duas vezes, mesmo que a etapa não tenha mudado com sucesso.
@@ -4367,12 +4371,12 @@ def dias_desde_referencia(deal_fresco: dict, etapa_atual_id: int, conversation_i
     correta pra contar a régua de silêncio nesta etapa.
 
     Normalmente é a CRIAÇÃO do negócio (startTime) — decisão confirmada
-    com Ronaldo em 05/08. Mas se a entrada na etapa atual NÃO veio da
+    com [gestor] em 05/08. Mas se a entrada na etapa atual NÃO veio da
     progressão normal do próprio robô (marcador [followup:etapa_normal:
     {id}] ausente na conversa), é sinal de que o negócio foi movido
     manualmente de volta pra essa etapa (ex: respondeu depois de
-    'Contato Retornado', e Ronaldo trouxe de volta pra '3° Contato' pra
-    reativar a régua) — criado 25/08, a pedido de Ronaldo. Nesse caso, o
+    'Contato Retornado', e [gestor] trouxe de volta pra '3° Contato' pra
+    reativar a régua) — criado 25/08, a pedido de [gestor]. Nesse caso, o
     relógio reinicia a partir de AGORA (a primeira vez que o robô nota a
     entrada manual), guardando um marcador
     [followup:regua_reiniciada:{timestamp}] pra usar o mesmo ponto de
@@ -4523,9 +4527,9 @@ def verificar_followup_dias_silencio():
             conversation_id = conv.get("id")
 
             # Relógio contado a partir da CRIAÇÃO do negócio (startTime), não
-            # do silêncio do lead — confirmado com Ronaldo em 05/08. Ex.:
+            # do silêncio do lead — confirmado com [gestor] em 05/08. Ex.:
             # criado segunda 03/08 -> D+1 dispara terça 04/08. EXCETO se a
-            # entrada na etapa atual foi um retorno manual (Ronaldo movendo
+            # entrada na etapa atual foi um retorno manual ([gestor] movendo
             # de volta), caso em que o relógio reinicia a partir de agora —
             # ver dias_desde_referencia (25/08).
             dias_desde_criacao = dias_desde_referencia(deal_fresco, etapa_atual_id, conversation_id, deal_id)
@@ -4541,7 +4545,7 @@ def verificar_followup_dias_silencio():
             # "resolved" no AgendorChat por inatividade, mesmo o negócio
             # continuando ativo — isso não significa que o lead terminou,
             # é justamente o cenário que esse follow-up existe pra cobrir
-            # (decisão de Ronaldo, 13/08, confirmado com dados reais do
+            # (decisão de [gestor], 13/08, confirmado com dados reais do
             # funil: vários negócios de dias atrás com conversa fechada).
             # Enviar mensagem reabre a conversa automaticamente; depois do
             # envio, resolve de novo pra manter a caixa "abertas" limpa.
@@ -4576,7 +4580,7 @@ def verificar_followup_dias_silencio():
                     # move pra "Perdido" genérica (não "sem contato", porque
                     # teve contato sim). Evita também que o negócio fique
                     # parado em 5º Contato pra sempre, batendo a mesma regra
-                    # D10 de novo na próxima rodada (decisão de Ronaldo, 13/08).
+                    # D10 de novo na próxima rodada (decisão de [gestor], 13/08).
                     if mover_etapa_funil_comercial(deal_id, ETAPA_PERDIDO_GENERICO):
                         send_private_note(conversation_id,
                             "🔁 Follow-up D10 esgotado. Já teve contato humano em algum momento, "
@@ -4613,7 +4617,7 @@ def log_resumo_usage():
     Corrigido 24/08: 'classificacao' (Haiku 4.5) usa uma tabela de preço
     BEM mais barata que Sonnet — usar a tabela do Sonnet pra essa categoria
     inflaria o número artificialmente e esconderia a economia real da
-    troca. ATENÇÃO Ronaldo: os valores de PRECO_HAIKU_* abaixo são minha
+    troca. ATENÇÃO [gestor]: os valores de PRECO_HAIKU_* abaixo são minha
     melhor referência, mas não tenho 100% de certeza que batem exatamente
     com a tabela atual da Anthropic — vale conferir rapidinho em
     console.anthropic.com (ou docs.claude.com/pricing) antes de usar esse
