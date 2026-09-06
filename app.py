@@ -3029,6 +3029,55 @@ def verificar_retomada_apos_silencio_humano_safe():
         print(f"[retomada:timer_1h] Erro geral na varredura: {e}", flush=True)
 
 
+LEADS_PARADOS_MINUTOS = int(os.environ.get("LEADS_PARADOS_MINUTOS", "30"))
+
+
+def verificar_leads_parados():
+    """Rede de segurança adicional (06/09, [gestor]): detecta conversas com
+    mensagem do lead pendente de resposta há mais de LEADS_PARADOS_MINUTOS
+    minutos (padrão 30).
+
+    Diferença importante em relação a verificar_retomada_apos_silencio_
+    humano: aquela depende de segundos_desde_ultima_intervencao_humana,
+    que por sua vez depende de reconhecer corretamente quem é "território
+    do Luca" (eh_assignee_bot) — se uma automação nativa nova ou mal
+    configurada disparar uma mensagem se passando por um humano não
+    reconhecido, o Luca podia ficar calado indefinidamente (caso real:
+    boas_vindas_primeiro_contato atribuindo a conversa a um funcionário
+    real via Sistema de Automação, sem reconhecimento configurado —
+    05-06/09). Esta varredura NÃO depende dessa checagem: usa
+    tentar_retomar_conversa, que confia só em "a última mensagem real é do
+    lead e ainda não foi respondida", não importa a causa do silêncio.
+    Roda mais frequente (a cada 15 min) com uma janela bem mais curta (30
+    min por padrão), como último recurso — mesmo limite de 24h das outras
+    varreduras pra não reprocessar histórico morto."""
+    agora = time.time()
+    for conv_key in list(conversation_histories.keys()):
+        try:
+            conversation_id = int(conv_key)
+        except (TypeError, ValueError):
+            continue
+        conv = conversation_histories.get(conv_key)
+        if not conv or conv.get("modo_demo"):
+            continue
+        last_msg_at = conv.get("last_msg_at") or 0
+        if last_msg_at <= 0:
+            continue
+        parado_ha = agora - last_msg_at
+        if parado_ha < LEADS_PARADOS_MINUTOS * 60 or parado_ha > 86400:
+            continue
+        if tentar_retomar_conversa(conversation_id, origem="leads_parados"):
+            print(f"[leads_parados] Lead estava parado há {int(parado_ha/60)}min, "
+                  f"Luca retomou conv={conversation_id}", flush=True)
+
+
+def verificar_leads_parados_safe():
+    try:
+        verificar_leads_parados()
+    except Exception as e:
+        print(f"[leads_parados] Erro geral na varredura: {e}", flush=True)
+
+
 @app.route("/agendorchat/conversation-updated", methods=["POST", "OPTIONS"])
 def agendorchat_conversation_updated():
     if request.method == "OPTIONS":
@@ -4654,6 +4703,7 @@ scheduler.add_job(log_resumo_usage, "interval", hours=1, id="usage_resumo_horari
 scheduler.add_job(verificar_followup_1h_silencio_safe, "interval", minutes=15, id="followup_1h_silencio")
 scheduler.add_job(verificar_followup_4h_silencio_humano_safe, "interval", minutes=15, id="followup_4h_silencio_humano")
 scheduler.add_job(verificar_retomada_apos_silencio_humano_safe, "interval", minutes=15, id="retomada_apos_silencio_humano")
+scheduler.add_job(verificar_leads_parados_safe, "interval", minutes=15, id="leads_parados")
 scheduler.add_job(verificar_followup_dias_silencio_safe, "interval", hours=3, id="followup_dias_silencio")
 scheduler.add_job(fetch_deals_safe, "date", run_date=datetime.now() + timedelta(seconds=5), id="fetch_inicial")
 scheduler.start()
